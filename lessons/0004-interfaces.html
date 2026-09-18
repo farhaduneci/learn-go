@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 4: Methods, interfaces &amp; composition</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 4 &middot; Part 1 · Go core</p>
+<h1>Methods, interfaces &amp; composition</h1>
+
+<p>Go has no classes and no inheritance. Small, implicitly satisfied interfaces plus struct embedding take their place, and the design style that follows is the core of idiomatic Go.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/doc/effective_go#interfaces_and_types">Effective Go — Interfaces and other types</a> and <a href="https://go.dev/doc/effective_go#embedding">Embedding</a>. Also <a href="https://go.dev/tour/methods/1">A Tour of Go — Methods and interfaces</a>.
+</div>
+
+<h2 id="interfaces-are-satisfied-implicitly">Interfaces are satisfied implicitly</h2>
+<p>An interface is a set of method signatures. <strong>Any type with those methods satisfies it.</strong> There's no <code>implements</code> keyword.</p>
+<pre class="go"><code>type FeeModel interface {
+    Fee(notional int64) int64
+}
+
+type FlatFee int64
+func (f FlatFee) Fee(int64) int64 { return int64(f) }
+
+type BpsFee int64
+func (b BpsFee) Fee(n int64) int64 { return n * int64(b) / 10_000 }
+
+var m FeeModel = BpsFee(5) // compiles because BpsFee has Fee(int64) int64</code></pre>
+<p>This is Python's duck typing checked at compile time. A package can define an interface that a type from another package already satisfies, without touching that type. That changes where interfaces live (lesson 15).</p>
+<p>A compile-time assertion documents intent and catches drift:</p>
+<pre class="go"><code>var _ FeeModel = FlatFee(0)</code></pre>
+<h2 id="small-interfaces">Small interfaces</h2>
+<p>The standard library's most powerful interfaces have one method:</p>
+<pre class="go"><code>type Reader interface { Read(p []byte) (n int, err error) }
+type Writer interface { Write(p []byte) (n int, err error) }
+type Stringer interface { String() string }
+type error interface { Error() string }</code></pre>
+<p>Files, sockets, buffers, gzip streams, HTTP bodies and hashes all compose through <code>io.Reader</code> and <code>io.Writer</code>. <em>"The bigger the interface, the weaker the abstraction"</em> is one of the Go proverbs. Build bigger interfaces by embedding small ones: <code>type ReadWriter interface { Reader; Writer }</code>.</p>
+<h2 id="interface-values-type-assertions-type-switches">Interface values, type assertions, type switches</h2>
+<p>An interface value holds a (<strong>dynamic type</strong>, <strong>value</strong>) pair. To get the concrete type back:</p>
+<pre class="go"><code>bf, ok := m.(BpsFee) // type assertion, with &quot;comma ok&quot; to avoid a panic
+
+switch v := x.(type) { // type switch
+case FlatFee:
+    fmt.Println(&quot;flat&quot;, int64(v))
+case BpsFee, Capped:
+    fmt.Println(&quot;bps or capped&quot;)
+default:
+    fmt.Println(&quot;unknown&quot;)
+}</code></pre>
+<p><code>any</code> (= <code>interface{}</code>) accepts every type. It's fine at true boundaries (JSON decoding, logging) and a smell in domain code, where it throws away the type checker.</p>
+<h2 id="composition-over-inheritance">Composition over inheritance</h2>
+<p><strong>Wrap</strong> instead of subclassing. A decorator holds another implementation of the same interface:</p>
+<pre class="go"><code>type Capped struct {
+    Inner FeeModel
+    Max   int64
+}
+
+func (c Capped) Fee(n int64) int64 { return min(c.Inner.Fee(n), c.Max) }</code></pre>
+<p><code>Capped{Inner: BpsFee(5), Max: 1000}</code> is itself a <code>FeeModel</code>, so decorators stack. HTTP middleware (lesson 16) is the same idea.</p>
+<h2 id="embedding">Embedding</h2>
+<p>Putting a type in a struct <strong>without a field name</strong> promotes its fields and methods:</p>
+<pre class="go"><code>type AuditedAccount struct {
+    *Ledger       // embedded: a.Post(...) and a.Total work directly
+    Log []int64
+}
+
+func (a *AuditedAccount) Post(amount int64) { // &quot;overrides&quot; by shadowing
+    a.Log = append(a.Log, amount)
+    a.Ledger.Post(amount) // explicit call to the embedded one: there is no super()
+}</code></pre>
+<p>This is <strong>not inheritance</strong>. The embedded <code>Ledger</code> doesn't know about the outer type, so a <code>Ledger</code> method that calls <code>Post</code> internally still calls <code>Ledger.Post</code>. There's no virtual dispatch through embedding. Expect that point in interviews.</p>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/04-interfaces/README.md"><code>exercises/04-interfaces</code></a>: three fee models behind one interface, a decorator, a type switch, and an embedded ledger with an overriding method.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "Does a Go type need to declare which interfaces it implements?", "a": "no"}, {"q": "What is the name of the empty interface alias added in Go 1.18?", "a": "any"}, {"q": "Which construct branches on an interface value&#x27;s dynamic type?", "a": "type switch"}, {"q": "Promoting the methods of a field into the outer struct is called what?", "a": "embedding"}, {"q": "Go proverb: the bigger the interface, the weaker the what?", "a": "abstraction"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0003-slices-maps-strings.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 3</a></span>
+  <span class="next"><a href="0005-errors.html">Next: Errors as values<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

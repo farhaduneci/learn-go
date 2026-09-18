@@ -1,0 +1,445 @@
+/* Shared stylesheet template for teach workspaces. Scandinavian system: neutral
+   black/white ink ladder, one sans family (Inter, self-hosted), restrained
+   borders over boxes, quiet motion. Dark mode by default. */
+
+@font-face {
+  font-family: "InterVariable";
+  src: url("fonts/InterVariable.woff2") format("woff2-variations"), url("fonts/InterVariable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  /* optional (not swap): either the font is ready before first paint — the
+     head <link rel="preload"> gives it a head start — or the page renders
+     once with the fallback and never swaps mid-read. No visible refont/pop. */
+  font-display: optional;
+}
+
+:root {
+  --font-sans: "InterVariable", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+
+  /* Soft dark canvas (Material-ish #121212, not pure black) with ink held just
+     under 100% white — less glare than a true-black/pure-white pairing while
+     staying comfortably above accessible contrast. */
+  --ink: rgb(255 255 255 / 92%);
+  --muted: rgb(255 255 255 / 58%);
+  --faint: rgb(255 255 255 / 38%);
+  --paper: #121212;
+  --paper-raised: #1c1c1c;
+  --rule: rgb(255 255 255 / 12%);
+  --rule-strong: rgb(255 255 255 / 18%);
+  --hover-fill: rgb(255 255 255 / 8%);
+  --pressed-fill: rgb(255 255 255 / 13%);
+  --accent: #7fb2e5;
+  --good: #5fc774;
+  --bad: #ef7a6d;
+  --code-bg: rgb(255 255 255 / 6%);
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --max-width: 680px;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+  --motion-fast: 140ms;
+  --motion-base: 200ms;
+  --motion-slow: 320ms;
+}
+
+/* Light theme override, toggled via <html data-theme="light">. Neutral
+   black-on-white ladder — no warm/cool tint in the neutrals. */
+html[data-theme="light"] {
+  --ink: #000000;
+  --muted: rgb(0 0 0 / 64%);
+  --faint: rgb(0 0 0 / 44%);
+  --paper: #ffffff;
+  --paper-raised: rgb(0 0 0 / 4%);
+  --rule: rgb(0 0 0 / 10%);
+  --rule-strong: rgb(0 0 0 / 18%);
+  --hover-fill: rgb(0 0 0 / 5%);
+  --pressed-fill: rgb(0 0 0 / 9%);
+  --accent: #1a5c8a;
+  --good: #1f7d3c;
+  --bad: #b23a2c;
+  --code-bg: rgb(0 0 0 / 4%);
+}
+
+* { box-sizing: border-box; }
+
+html {
+  font-size: 18px;
+  scroll-behavior: auto;
+}
+@media (prefers-reduced-motion: no-preference) {
+  html { scroll-behavior: smooth; }
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-weight: 400;
+  line-height: 1.55;
+  max-width: var(--max-width);
+  margin: 0 auto;
+  padding: 3rem 1.5rem 6rem;
+  transition: background-color var(--motion-base) ease, color var(--motion-base) ease;
+}
+
+h1, h2, h3 {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  font-size: 1.9rem;
+  line-height: 1.12;
+  margin: 0 0 0.25rem;
+}
+
+/* Not display:flex: this paragraph is often plain text interrupted by an
+   inline <a> (breadcrumb link, then " · Section · Type"). A flex container
+   would split that surrounding text into separate anonymous flex items that
+   each wrap independently, breaking the sentence into ragged columns instead
+   of flowing normally — keep it as normal inline text flow. */
+.lesson-kicker {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--muted);
+  margin: 0 0 0.75rem;
+}
+.lesson-kicker a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--muted);
+  text-decoration: none;
+}
+.lesson-kicker a:hover { color: var(--ink); }
+.lesson-kicker .icon { width: 0.95em; height: 0.95em; }
+
+h2 {
+  font-size: 1.25rem;
+  margin: 2.5rem 0 0.75rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--rule);
+  scroll-margin-top: 1.5rem;
+}
+
+h3 {
+  font-size: 1.05rem;
+  margin: 1.5rem 0 0.5rem;
+}
+
+p { margin: 0.9rem 0; }
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  transition: text-decoration-thickness var(--motion-fast) ease;
+}
+a:hover { text-decoration-thickness: 2px; }
+
+code, pre {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: var(--code-bg);
+  color: var(--ink);
+  border-radius: var(--radius-sm);
+}
+
+code { padding: 0.1em 0.35em; }
+
+pre {
+  padding: 0.9rem 1rem;
+  overflow-x: auto;
+  line-height: 1.5;
+  border: 1px solid var(--rule);
+}
+pre code { padding: 0; background: none; border: none; }
+
+blockquote {
+  margin: 1rem 0;
+  padding: 0.1rem 1rem;
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* Not display:flex, for the same reason as .lesson-kicker above: citation
+   text is prose with one or two inline links stitched through it (and
+   sometimes a trailing icon inside the last link), so it must stay normal
+   inline flow rather than being split into independently-wrapping columns. */
+.citation {
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.citation .icon { width: 0.9em; height: 0.9em; margin: 0 0.25rem; vertical-align: -0.13em; }
+
+.callout {
+  background: var(--paper-raised);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  padding: 0.9rem 1.1rem;
+  margin: 1.25rem 0;
+  font-size: 0.95rem;
+}
+
+.callout-title {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 600;
+  font-size: 0.82rem;
+  color: var(--accent);
+  margin-bottom: 0.35rem;
+}
+.callout-title .icon { width: 1em; height: 1em; }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.92rem;
+}
+th, td {
+  text-align: left;
+  padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+th {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.lesson-nav {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.88rem;
+  font-weight: 500;
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+}
+.lesson-nav a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--ink);
+  text-decoration: none;
+}
+.lesson-nav a:hover { color: var(--accent); }
+.lesson-nav .icon { width: 1em; height: 1em; }
+.lesson-nav .next {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.ask-agent {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  margin-top: 3rem;
+  padding: 1rem 1.1rem;
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--radius-md);
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+.ask-agent .icon { width: 1.1em; height: 1.1em; flex: none; margin-top: 0.15em; color: var(--faint); }
+
+hr.rule {
+  border: none;
+  border-top: 1px solid var(--rule);
+  margin: 2rem 0;
+}
+
+/* Table of contents, used on lessons/reference pages */
+.toc {
+  background: var(--paper-raised);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  padding: 0.9rem 1.2rem;
+  margin: 1.5rem 0 2rem;
+}
+.toc-title {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-weight: 500;
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-bottom: 0.5rem;
+}
+.toc-title .icon { width: 1em; height: 1em; }
+.toc ol {
+  margin: 0;
+  padding-left: 1.2rem;
+  font-size: 0.92rem;
+}
+.toc li { margin: 0.25rem 0; }
+.toc a { color: var(--ink); text-decoration: none; }
+.toc a:hover { color: var(--accent); text-decoration: underline; }
+
+/* Quiz component: question box, text input, feedback */
+.quiz-item {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.1rem;
+  margin: 1rem 0;
+}
+.quiz-q { font-weight: 600; margin-top: 0; }
+.quiz-input {
+  font-family: inherit;
+  font-size: 0.95rem;
+  padding: 0.4rem 0.6rem;
+  width: 100%;
+  max-width: 320px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-sm);
+  margin-bottom: 0.5rem;
+  background: var(--code-bg);
+  color: var(--ink);
+  transition: border-color var(--motion-fast) ease;
+}
+.quiz-input::placeholder { color: var(--faint); }
+.quiz-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+.quiz-feedback {
+  font-size: 0.88rem;
+  min-height: 1.2em;
+  margin-bottom: 0;
+  opacity: 0;
+  transform: translateY(-2px);
+  transition: opacity var(--motion-base) var(--ease-out), transform var(--motion-base) var(--ease-out);
+}
+.quiz-feedback.is-visible { opacity: 1; transform: none; }
+
+/* Generic buttons, used by quiz component and elsewhere */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--font-sans);
+  font-size: 0.82rem;
+  font-weight: 500;
+  padding: 0.35rem 0.8rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--rule);
+  background: var(--code-bg);
+  color: var(--ink);
+  cursor: pointer;
+  margin-right: 0.4rem;
+  transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease, transform var(--motion-fast) var(--ease-out);
+}
+.btn .icon { width: 1em; height: 1em; }
+.btn:hover { border-color: var(--rule-strong); background: var(--hover-fill); }
+.btn:active { transform: scale(0.97); }
+
+/* Dark/light theme toggle button, fixed top-right on every page. */
+.theme-toggle {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  border: 1px solid var(--rule);
+  background: var(--paper-raised);
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 10;
+  transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease, transform var(--motion-fast) var(--ease-out);
+}
+.theme-toggle .icon { width: 1.05rem; height: 1.05rem; }
+.theme-toggle:hover { border-color: var(--rule-strong); background: var(--hover-fill); }
+.theme-toggle:active { transform: scale(0.94); }
+
+/* Icon sprite base: inherits text color, sized by its container. */
+.icon {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  flex: none;
+  line-height: 0;
+}
+.icon svg { width: 100%; height: 100%; display: block; }
+
+/* Scroll-reveal used on index-style listing pages (lesson path, reference
+   list, hub track cards) — never on lesson prose, which users read once and
+   should never move for style. */
+.reveal {
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity var(--motion-slow) var(--ease-out), transform var(--motion-slow) var(--ease-out);
+}
+.reveal.is-visible { opacity: 1; transform: none; }
+
+/* Small screens: the desktop scale (18px root) sets body text a size too
+   large once it's the only column on the page, and it makes headings wrap
+   awkwardly. Step the whole rem scale down instead of hand-tuning each rule. */
+@media (max-width: 600px) {
+  html { font-size: 16px; }
+  body { padding: 2.25rem 1.25rem 4rem; }
+  h1 { font-size: 1.55rem; }
+  .lesson-nav {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.6rem;
+  }
+  /* Status tag is floated top-right of the path-list item for the desktop
+     corner-badge look; on a narrow column the title text wraps around it
+     instead. Stack it above the title there. */
+  .path li .status-tag {
+    float: none;
+    display: flex;
+    width: fit-content;
+    margin-bottom: 0.4rem;
+  }
+}
+
+/* Printing always uses a light, ink-conscious palette regardless of the
+   on-screen theme — dark backgrounds waste toner and look broken on paper. */
+@media print {
+  :root {
+    --ink: #000000;
+    --paper: #ffffff;
+    --paper-raised: #ffffff;
+    --muted: #444444;
+    --faint: #666666;
+    --rule: #cccccc;
+    --accent: #1a5c8a;
+    --good: #1f7d3c;
+    --bad: #b23a2c;
+    --code-bg: #f5f5f5;
+  }
+  .theme-toggle { display: none; }
+}
+
+/* Reduced motion: keep opacity/color feedback (Tier 3), drop movement and
+   smooth-scroll (Tier 1/2). Elements gated by .reveal/.quiz-feedback still
+   get their fade, just without translation and near-instantly. */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .reveal { transform: none; }
+  .quiz-feedback { transform: none; }
+}

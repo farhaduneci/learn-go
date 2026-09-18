@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Reference: Go code-review checklist</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Reference &middot; Quick Lookup</p>
+<h1>Go code-review checklist</h1>
+
+<p class="citation">Compressed from lessons 5, 7, 10–18. Sources of truth: <a href="https://go.dev/wiki/CodeReviewComments">Go Code Review Comments</a>, <a href="https://google.github.io/styleguide/go/">Google Go Style Guide</a>, <a href="https://github.com/uber-go/guide/blob/master/style.md">Uber Go Style Guide</a>.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<h2 id="errors">Errors</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" />Every error is checked or explicitly discarded (<code>_ =</code>) with a reason.</label></li>
+<li><label><input type="checkbox" />Errors are wrapped with context that says <strong>what was being done</strong>: <code>fmt.Errorf("reserve cash for %s: %w", id, err)</code>.</label></li>
+<li><label><input type="checkbox" /><code>errors.Is</code>/<code>As</code> are used, never <code>==</code> on wrapped errors or string matching.</label></li>
+<li><label><input type="checkbox" />Success returns a literal <code>nil</code>, never a typed nil pointer.</label></li>
+<li><label><input type="checkbox" />No <code>panic</code> for expected failures. <code>recover</code> only at boundaries.</label></li>
+<li><label><input type="checkbox" />Errors are either logged or returned, not both (double logging).</label></li>
+</ul>
+<h2 id="api-and-naming">API and naming</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" />Package names are short and specific; no <code>util</code>, <code>common</code> or <code>models</code>.</label></li>
+<li><label><input type="checkbox" />No stutter (<code>orderbook.Book</code>, not <code>orderbook.OrderBook</code>).</label></li>
+<li><label><input type="checkbox" />Interfaces are small and declared by the consumer. Constructors return concrete types.</label></li>
+<li><label><input type="checkbox" />Exported identifiers have doc comments starting with the name.</label></li>
+<li><label><input type="checkbox" />No exported mutable package-level variables. No I/O in <code>init()</code>.</label></li>
+<li><label><input type="checkbox" />Internal slices and maps aren't returned without copying.</label></li>
+<li><label><input type="checkbox" />Zero values are useful, or a constructor is required and documented.</label></li>
+</ul>
+<h2 id="concurrency">Concurrency</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" />Every <code>go</code> statement: how does it end, and who waits for it?</label></li>
+<li><label><input type="checkbox" />Blocking channel operations in long-lived goroutines sit in a <code>select</code> with <code>ctx.Done()</code>.</label></li>
+<li><label><input type="checkbox" />Channels are closed only by their sender, and only once.</label></li>
+<li><label><input type="checkbox" />Shared state has a documented guard (<code>mu sync.Mutex // guards x</code>).</label></li>
+<li><label><input type="checkbox" />No lock is held across I/O, a channel send, or a callback.</label></li>
+<li><label><input type="checkbox" />Mutex-holding structs aren't copied (pointer receivers).</label></li>
+<li><label><input type="checkbox" /><code>ctx</code> is the first parameter, is passed along rather than stored, and <code>cancel</code> is deferred.</label></li>
+<li><label><input type="checkbox" />Tests run with <code>-race</code>, and concurrent packages use <code>goleak</code>.</label></li>
+</ul>
+<h2 id="performance-hot-paths-only">Performance (hot paths only)</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" />Slices and maps are preallocated when the size is known.</label></li>
+<li><label><input type="checkbox" />No <code>fmt.Sprintf</code>, <code>+=</code> string building, or <code>any</code> boxing in tight loops.</label></li>
+<li><label><input type="checkbox" />Allocation budgets are enforced by a test or benchmark (<code>AllocsPerRun</code>, <code>-benchmem</code>).</label></li>
+<li><label><input type="checkbox" />Claims backed by <code>benchstat</code>, not a single run.</label></li>
+<li><label><input type="checkbox" /><code>http.Client</code> and <code>http.Server</code> have timeouts, and response bodies are closed and drained.</label></li>
+</ul>
+<h2 id="testing">Testing</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" />Table-driven, with named subtests and <code>got X, want Y</code> messages.</label></li>
+<li><label><input type="checkbox" />Fakes over mocks. Clock and randomness are injected.</label></li>
+<li><label><input type="checkbox" />Parsers of external input have fuzz tests.</label></li>
+<li><label><input type="checkbox" />No sleeps for synchronisation in tests. Use channels, or poll with a deadline.</label></li>
+</ul>
+<h2 id="readability">Readability</h2>
+<ul class="task-list">
+<li><label><input type="checkbox" />Happy path left-aligned, with early returns for errors.</label></li>
+<li><label><input type="checkbox" />Functions fit on a screen; no boolean flag parameters.</label></li>
+<li><label><input type="checkbox" />Comments explain <strong>why</strong>, not what.</label></li>
+<li><label><input type="checkbox" /><code>gofmt</code>, <code>go vet</code>, <code>staticcheck</code> / <code>golangci-lint</code> are clean.</label></li>
+</ul>
+
+<div class="lesson-nav">
+  <span><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a></span>
+  <span></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

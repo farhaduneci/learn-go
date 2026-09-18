@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 1: Toolchain &amp; modules</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 1 &middot; Part 1 · Go core</p>
+<h1>Toolchain &amp; modules</h1>
+
+<p>Go ships one tool that builds, tests, formats, vets and manages dependencies. Learning it first removes most of the friction that Python's tooling ecosystem trains people to expect.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/doc/tutorial/getting-started">Tutorial: Get started with Go</a> and <a href="https://go.dev/doc/modules/managing-dependencies">Managing dependencies</a> (go.dev, ~20 min). Then the first ten slides of <a href="https://go.dev/tour/welcome/1">A Tour of Go</a> for syntax.
+</div>
+
+<h2 id="one-binary-every-job">One binary, every job</h2>
+<p>In Python, a working setup often means pyenv + venv + pip/poetry/uv + black + ruff + mypy + pytest. Go folds nearly all of that into the <code>go</code> command:</p>
+<table>
+<colgroup>
+<col style="width: 33%" />
+<col style="width: 33%" />
+<col style="width: 33%" />
+</colgroup>
+<thead>
+<tr>
+<th>Job</th>
+<th>Python</th>
+<th>Go</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Run a script</td>
+<td><code>python main.py</code></td>
+<td><code>go run .</code></td>
+</tr>
+<tr>
+<td>Build an artifact</td>
+<td>wheel / PyInstaller</td>
+<td><code>go build</code> → one static binary</td>
+</tr>
+<tr>
+<td>Dependencies</td>
+<td><code>pyproject.toml</code> + lock file</td>
+<td><code>go.mod</code> + <code>go.sum</code></td>
+</tr>
+<tr>
+<td>Format</td>
+<td>black</td>
+<td><code>gofmt</code> / <code>go fmt ./...</code> (no options, no debates)</td>
+</tr>
+<tr>
+<td>Lint</td>
+<td>ruff / pylint</td>
+<td><code>go vet ./...</code> (+ <code>staticcheck</code>, <code>golangci-lint</code>)</td>
+</tr>
+<tr>
+<td>Type check</td>
+<td>mypy</td>
+<td>the compiler</td>
+</tr>
+<tr>
+<td>Test</td>
+<td>pytest</td>
+<td><code>go test ./...</code></td>
+</tr>
+<tr>
+<td>Docs</td>
+<td>Sphinx</td>
+<td><code>go doc</code>, pkg.go.dev from comments</td>
+</tr>
+</tbody>
+</table>
+<p><code>./...</code> means "this directory and every package below it". It shows up everywhere.</p>
+<h2 id="modules-and-packages">Modules and packages</h2>
+<p>A <strong>module</strong> is a versioned unit of code with a <code>go.mod</code> at its root. A <strong>package</strong> is a directory of <code>.go</code> files that share one <code>package</code> clause. A module contains packages.</p>
+<pre class="sh"><code>mkdir hello &amp;&amp; cd hello
+go mod init github.com/example/hello   # module path = where it would be fetched from</code></pre>
+<pre class="go"><code>// main.go
+package main // package main + func main = an executable
+
+import &quot;fmt&quot;
+
+func main() {
+    fmt.Println(&quot;hello&quot;)
+}</code></pre>
+<pre class="sh"><code>go run .                     # compile to a temp dir and run
+go build -o bin/hello .      # static binary, no interpreter needed at deploy time
+GOOS=linux GOARCH=amd64 go build -o bin/hello-linux .   # cross-compile, no toolchain setup</code></pre>
+<p>Adding a dependency is just importing it and running <code>go mod tidy</code>, or explicitly <code>go get example.com/pkg@v1.2.3</code>. <code>go.sum</code> pins cryptographic hashes; commit both files. There is no global site-packages and no virtualenv. Each module's dependency graph is resolved with <strong>minimal version selection</strong>: the oldest version that satisfies every requirement, which makes builds reproducible without a lock-file solver.</p>
+<h2 id="the-shape-of-a-go-file">The shape of a Go file</h2>
+<pre class="go"><code>package pricing
+
+import (
+    &quot;errors&quot;
+    &quot;fmt&quot;
+)
+
+// Exported names start with an upper-case letter. This comment is the doc.
+func Hello(name string) string {
+    if name == &quot;&quot; {
+        name = &quot;world&quot;
+    }
+    return fmt.Sprintf(&quot;Hello, %s!&quot;, name)
+}
+
+func helper() {} // lower-case: private to the package</code></pre>
+<p>Differences a Python developer hits in the first hour:</p>
+<ul>
+<li><strong>Braces, not indentation</strong>, and the opening brace must be on the same line.</li>
+<li><strong>No unused imports or variables.</strong> They're compile errors, not warnings.</li>
+<li><strong><code>:=</code> declares and assigns</strong> (<code>x := 5</code>). <code>=</code> only assigns to an existing variable.</li>
+<li><strong>One loop keyword:</strong> <code>for</code>. <code>for i := 0; i &lt; n; i++</code>, <code>for cond {}</code>, <code>for {}</code>, <code>for i, v := range s</code>, and since Go 1.22, <code>for i := range 10</code>.</li>
+<li><strong>Multiple return values</strong> instead of tuples: <code>func Stats(s []int) (lo, hi int, ok bool)</code>.</li>
+<li><strong>Variadic</strong> <code>func Sum(nums ...int)</code> is <code>*args</code>; call with a slice as <code>Sum(s...)</code>.</li>
+</ul>
+<h2 id="tests-live-next-to-the-code">Tests live next to the code</h2>
+<p><code>foo_test.go</code> files in the same directory are compiled only by <code>go test</code>. No framework is needed:</p>
+<pre class="go"><code>func TestHello(t *testing.T) {
+    if got := Hello(&quot;&quot;); got != &quot;Hello, world!&quot; {
+        t.Errorf(&quot;Hello(\&quot;\&quot;) = %q, want %q&quot;, got, &quot;Hello, world!&quot;)
+    }
+}</code></pre>
+<pre class="sh"><code>go test ./...                   # all packages
+go test -run TestHello -v ./... # one test, verbose
+go test -race ./...             # with the race detector (use it always from lesson 8 on)
+go test -cover ./...            # coverage</code></pre>
+<p>The "got X, want Y" message format is a Go convention. Lesson 14 covers testing in depth.</p>
+<h2 id="editor-setup">Editor setup</h2>
+<p>Install <strong>gopls</strong>, the official language server (VS Code's Go extension does it automatically). It gives completion, go-to-definition, rename, and format + organize imports on save. With format-on-save on, style never needs to be thought about again, and every Go codebase reads the same. That's a large part of why Go teams move fast.</p>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/01-toolchain/README.md"><code>exercises/01-toolchain</code></a>: three warm-up functions, plus running <code>go test</code>, <code>go vet</code> and <code>gofmt -l</code> on them. Also create a throwaway module outside this repo with <code>go mod init</code>, add a dependency with <code>go get</code>, and read the resulting <code>go.mod</code>.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "Which command adds missing and removes unused module requirements?", "a": "go mod tidy"}, {"q": "Which file records the checksums of every dependency?", "a": "go.sum"}, {"q": "Go&#x27;s equivalent of Python&#x27;s black is which command?", "a": "gofmt"}, {"q": "Which flag enables the data race detector?", "a": "-race"}, {"q": "A test function&#x27;s signature takes which parameter type?", "a": "*testing.T"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a></span>
+  <span class="next"><a href="0002-types-pointers.html">Next: Types, zero values, structs &amp; pointers<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

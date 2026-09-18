@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 6: Generics</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 6 &middot; Part 1 · Go core</p>
+<h1>Generics</h1>
+
+<p>Type parameters (Go 1.18+) remove the copy-paste and interface{} casts behind containers and algorithms. Knowing when not to use them matters just as much.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/doc/tutorial/generics">Tutorial: Getting started with generics</a> and <a href="https://go.dev/blog/when-generics">When To Use Generics</a> (Ian Lance Taylor, go.dev blog).
+</div>
+
+<h2 id="syntax">Syntax</h2>
+<pre class="go"><code>func Map[T, U any](s []T, f func(T) U) []U {
+    out := make([]U, 0, len(s))
+    for _, v := range s {
+        out = append(out, f(v))
+    }
+    return out
+}
+
+strs := Map([]int{1, 2}, strconv.Itoa) // T=int, U=string inferred</code></pre>
+<p>Type parameters go in square brackets. Each has a <strong>constraint</strong>, which is an interface.</p>
+<h2 id="constraints">Constraints</h2>
+<pre class="go"><code>any                       // no requirements
+comparable                // supports == (usable as a map key)
+cmp.Ordered               // supports &lt; &lt;= &gt; &gt;= (ints, floats, strings)
+
+type Number interface {   // a type set
+    ~int | ~int64 | ~float64
+}</code></pre>
+<p><code>~int64</code> means "any type whose <strong>underlying type</strong> is int64", so a custom <code>type Cents int64</code> satisfies it. Without the tilde, only <code>int64</code> itself does.</p>
+<h2 id="generic-types">Generic types</h2>
+<pre class="go"><code>type Set[T comparable] struct{ m map[T]struct{} }
+
+func (s *Set[T]) Add(v T) {
+    if s.m == nil { s.m = make(map[T]struct{}) } // useful zero value
+    s.m[v] = struct{}{}
+}
+
+type Stack[T any] struct{ items []T }
+func (s *Stack[T]) Pop() (v T, ok bool) { ... } // &quot;var zero T&quot; gives the zero value</code></pre>
+<p>Methods can use the type's parameters but <strong>can't introduce new ones</strong>. A method <code>func (s *Set[T]) Map[U any]()</code> is illegal, so write a top-level function instead. The same goes for stricter constraints: <code>SortedItems[T cmp.Ordered](s *Set[T])</code> has to be a function.</p>
+<h2 id="when-to-use-them">When to use them</h2>
+<p>Use generics for:</p>
+<ul>
+<li><strong>Containers</strong>: sets, stacks, queues, caches, trees, ring buffers.</li>
+<li><strong>Algorithms over any element type</strong>: map/filter/reduce, sorting helpers, <code>slices.*</code> and <code>maps.*</code>.</li>
+<li>Removing duplicated code that differs <strong>only in type</strong>.</li>
+</ul>
+<p>Prefer an <strong>interface</strong> when behaviour differs per type. <code>FeeModel</code> (lesson 4) has different logic for each implementation, so a type parameter would add nothing. The rule from the Go team: <em>write code, don't design types</em>. Reach for generics when the same code is being written a second time for a different type, not up front.</p>
+<p>Performance note: Go compiles generics with <strong>GC shape stenciling</strong>, which shares code between types of the same shape and passes a dictionary. Generic code is usually as fast as hand-written code, but calling methods through a type-parameter constraint can be slower than on a concrete type in hot paths. Benchmark before assuming.</p>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/06-generics/README.md"><code>exercises/06-generics</code></a>: Map/Filter/Reduce, <code>MaxOf</code> with <code>cmp.Ordered</code>, a zero-value-ready <code>Set</code>, a <code>Stack</code> that clears popped references, and <code>GroupBy</code>.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "Which constraint allows == and != and map keys?", "a": "comparable"}, {"q": "Which standard package defines the Ordered constraint?", "a": "cmp"}, {"q": "In a constraint, what does the ~ in ~int mean?", "a": "underlying type"}, {"q": "Methods cannot declare their own type parameters: true or false?", "a": "true"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0005-errors.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 5</a></span>
+  <span class="next"><a href="0007-packages.html">Next: Packages, visibility &amp; project layout<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

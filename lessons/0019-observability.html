@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 19: Observability: slog, metrics, tracing, profiling</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 19 &middot; Part 3 · Senior Go</p>
+<h1>Observability: slog, metrics, tracing, profiling</h1>
+
+<p>A service nobody can see into can't be operated. This lesson covers the Go observability stack (structured logs with slog, Prometheus metrics, OpenTelemetry traces, continuous profiling) and what to measure in a trading system.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/blog/slog">Structured Logging with slog</a> (go.dev blog), <a href="https://opentelemetry.io/docs/languages/go/getting-started/">OpenTelemetry Go — Getting started</a>, <a href="https://prometheus.io/docs/guides/go-application/">Instrumenting a Go application for Prometheus</a>, and Google's <a href="https://sre.google/sre-book/monitoring-distributed-systems/">SRE book — Monitoring Distributed Systems</a> (the four golden signals).
+</div>
+
+<h2 id="structured-logging-with-logslog">Structured logging with log/slog</h2>
+<p>Since Go 1.21 the standard library has structured, levelled logging:</p>
+<pre class="go"><code>logger := slog.New(slog.NewJSONHandler(os.Stdout, &amp;slog.HandlerOptions{Level: slog.LevelInfo})).
+    With(slog.String(&quot;service&quot;, &quot;order-gateway&quot;))
+
+logger.LogAttrs(ctx, slog.LevelInfo, &quot;order filled&quot;,
+    slog.Group(&quot;fill&quot;, slog.String(&quot;symbol&quot;, f.Symbol), slog.Int64(&quot;qty&quot;, f.Qty)),
+    slog.String(&quot;request_id&quot;, id),
+)
+// {&quot;time&quot;:&quot;…&quot;,&quot;level&quot;:&quot;INFO&quot;,&quot;msg&quot;:&quot;order filled&quot;,&quot;service&quot;:&quot;order-gateway&quot;,&quot;fill&quot;:{&quot;symbol&quot;:&quot;AAPL&quot;,&quot;qty&quot;:10},&quot;request_id&quot;:&quot;req-7&quot;}</code></pre>
+<ul>
+<li>Log <strong>events with fields</strong>, not formatted sentences. Fields are queryable, and <code>fmt.Sprintf</code> messages aren't.</li>
+<li>Use <code>LogAttrs</code> with typed attrs on hot paths. The <code>logger.Info("msg", "k", v)</code> form boxes every value into <code>any</code>.</li>
+<li>Pass request IDs and trace IDs via context, and use a custom <code>slog.Handler</code> that reads them from <code>ctx</code>, so no call site forgets them.</li>
+<li>Don't log secrets or PII, and don't log every order at Info on a high-volume path. Sample, or rely on metrics.</li>
+<li>Pass the logger into constructors. <code>slog.SetDefault</code> is fine in <code>main</code> but is global state.</li>
+</ul>
+<h2 id="metrics">Metrics</h2>
+<p>Metrics are cheap, aggregated numbers, and alerting is built on them. With <code>prometheus/client_golang</code>:</p>
+<pre class="go"><code>var orderLatency = promauto.NewHistogramVec(prometheus.HistogramOpts{
+    Name:    &quot;engine_submit_seconds&quot;,
+    Buckets: prometheus.ExponentialBuckets(0.00001, 2, 16), // 10µs … ~0.3s
+}, []string{&quot;symbol&quot;, &quot;result&quot;})
+
+orderLatency.WithLabelValues(&quot;AAPL&quot;, &quot;filled&quot;).Observe(time.Since(start).Seconds())</code></pre>
+<ul>
+<li><strong>Counter</strong>: only goes up (orders total). <strong>Gauge</strong>: goes up and down (book depth, queue length). <strong>Histogram</strong>: distributions such as latency and sizes, which are what p99 is computed from.</li>
+<li>The <strong>four golden signals</strong>: latency, traffic, errors, saturation. For a matching engine, also track queue depth into the engine goroutine (saturation), event-publish lag, and <code>go_gc_duration_seconds</code> / <code>go_goroutines</code>.</li>
+<li><strong>Label cardinality</strong>: never label with order IDs or user IDs. Each unique label set becomes a separate time series and can take down the metrics backend.</li>
+</ul>
+<p>A fixed-bucket histogram with one atomic counter per bucket (exercise 19) is how these libraries work internally, and it's why recording a metric can be lock-free and nanoseconds-cheap.</p>
+<h2 id="distributed-tracing">Distributed tracing</h2>
+<p>A trace follows one request across services as a tree of <strong>spans</strong>. OpenTelemetry is the standard:</p>
+<pre class="go"><code>ctx, span := tracer.Start(ctx, &quot;engine.Submit&quot;)
+defer span.End()
+span.SetAttributes(attribute.String(&quot;symbol&quot;, sym))</code></pre>
+<p>Instrumented HTTP and gRPC clients and servers (<code>otelhttp</code>, <code>otelgrpc</code>) <strong>propagate the trace context</strong> in headers, so spans across services join up. This is why <code>ctx</code> has to be passed everywhere: it carries the span.</p>
+<h2 id="profiling-as-the-fourth-signal">Profiling as the fourth signal</h2>
+<p>Continuous profiling (lesson 18) answers "why is this slower than last week?" down to a line of code. Together, logs, metrics, traces and profiles give coverage that no single one provides.</p>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/19-observability/README.md"><code>exercises/19-observability</code></a>: a JSON slog logger with a service tag, a grouped log record carrying a request ID from context, a lock-free latency histogram with quantiles, and timing middleware.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "Which slog method takes typed Attr values and avoids any-boxing?", "a": "LogAttrs"}, {"q": "Which Prometheus metric type is right for request latency?", "a": "histogram"}, {"q": "The four golden signals are latency, traffic, errors and what?", "a": "saturation"}, {"q": "Logs, metrics, traces, and which fourth signal does continuous profiling add?", "a": "profiles"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0018-performance.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 18</a></span>
+  <span class="next"><a href="0020-messaging.html">Next: Messaging from Go: Kafka, NATS &amp; delivery guarantees<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

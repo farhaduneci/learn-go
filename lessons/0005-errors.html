@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 5: Errors as values</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 5 &middot; Part 1 · Go core</p>
+<h1>Errors as values</h1>
+
+<p>Go has no exceptions for expected failures. Errors are ordinary return values, and that turns error handling into visible, reviewable control flow. Doing it well (wrapping, sentinels, typed errors) marks senior Go code.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/blog/go1.13-errors">Working with Errors in Go 1.13</a> (go.dev blog) and <a href="https://go.dev/blog/errors-are-values">Errors are values</a> (Rob Pike). The <a href="https://pkg.go.dev/errors">errors package docs</a> are short.
+</div>
+
+<h2 id="the-pattern">The pattern</h2>
+<pre class="go"><code>f, err := os.Open(path)
+if err != nil {
+    return fmt.Errorf(&quot;load config %s: %w&quot;, path, err)
+}
+defer f.Close()</code></pre>
+<p><code>error</code> is a one-method interface: <code>Error() string</code>. Functions that can fail return it <strong>last</strong>. Callers check it <strong>immediately</strong>, then handle it or return it with added context. The happy path stays left-aligned and every failure point is visible, so no code path can throw from somewhere unexpected.</p>
+<p>Python translation: <code>raise</code> becomes <code>return ..., err</code>, and <code>try/except</code> becomes <code>if err != nil</code>. <code>finally</code> becomes <code>defer</code>.</p>
+<h2 id="three-kinds-of-errors">Three kinds of errors</h2>
+<p><strong>1. Opaque</strong>: <code>errors.New("...")</code> or <code>fmt.Errorf("...")</code>. Callers only log or return it. This is the default.</p>
+<p><strong>2. Sentinel</strong>: a package-level value callers compare against:</p>
+<pre class="go"><code>var ErrInsufficientFunds = errors.New(&quot;insufficient funds&quot;)
+// io.EOF, sql.ErrNoRows, context.Canceled are all sentinels</code></pre>
+<p><strong>3. Typed</strong>: a struct carrying data:</p>
+<pre class="go"><code>type ValidationError struct{ Field, Reason string }
+func (e *ValidationError) Error() string { return &quot;invalid &quot; + e.Field + &quot;: &quot; + e.Reason }</code></pre>
+<p>Each exported sentinel or type becomes part of the package's API, so export them only when callers genuinely need to branch on them.</p>
+<h2 id="wrapping-is-and-as">Wrapping, Is and As</h2>
+<p><code>%w</code> wraps an error while adding context. The chain can still be inspected:</p>
+<pre class="go"><code>err := fmt.Errorf(&quot;place order %s: %w&quot;, id, ErrInsufficientFunds)
+
+errors.Is(err, ErrInsufficientFunds) // true: walks the chain comparing values
+
+var ve *ValidationError
+if errors.As(err, &amp;ve) {             // finds the first *ValidationError in the chain
+    log.Println(&quot;bad field:&quot;, ve.Field)
+}</code></pre>
+<p>Never compare with <code>err == ErrX</code> once wrapping is involved, and never match on <code>err.Error()</code> strings. Use <code>%v</code> instead of <code>%w</code> when the underlying error should <strong>not</strong> become part of the API. Wrapping exposes it.</p>
+<p>Good context reads like a path: <code>place order o-17: reserve cash: db: connection refused</code>. Each layer adds <strong>what it was doing</strong>, not "error occurred".</p>
+<h2 id="the-nil-interface-trap">The nil interface trap</h2>
+<p>An interface is nil only when <strong>both</strong> its type and value are nil:</p>
+<pre class="go"><code>func validate() error {
+    var ve *ValidationError // nil pointer
+    if bad { ve = &amp;ValidationError{...} }
+    return ve               // BUG: returns (type=*ValidationError, value=nil), which != nil
+}</code></pre>
+<p>Return a literal <code>nil</code> on success. This is one of the most common Go interview questions.</p>
+<h2 id="panic-and-recover">panic and recover</h2>
+<p><code>panic</code> is for <strong>programmer errors and impossible states</strong>: index out of range, nil map write, broken invariants. Never use it for expected failures like bad input or network errors. <code>recover</code> inside a <code>defer</code> stops a panic, but only in the same goroutine:</p>
+<pre class="go"><code>func SafeDiv(a, b int) (q int, err error) {
+    defer func() {
+        if r := recover(); r != nil {
+            err = fmt.Errorf(&quot;safe div: %v&quot;, r) // named result lets defer set it
+        }
+    }()
+    return a / b, nil
+}</code></pre>
+<p>Legitimate uses are narrow: HTTP servers recover per request (<code>net/http</code> does this), and worker pools recover per job so one bad message doesn't kill the process. <strong>A panic in any goroutine without a recover crashes the entire program</strong>, which matters for lesson 8.</p>
+<h2 id="defer">defer</h2>
+<p><code>defer</code> runs a call when the surrounding function returns, in LIFO order. The arguments are evaluated immediately. It's the tool for cleanup: <code>defer f.Close()</code>, <code>defer mu.Unlock()</code>, <code>defer cancel()</code>. A deferred closure can read and modify <strong>named</strong> results, as <code>SafeDiv</code> does.</p>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/05-errors/README.md"><code>exercises/05-errors</code></a>: a typed validation error, a sentinel, wrapping with context, <code>errors.Is</code>/<code>As</code> through the chain, and turning a panic into an error.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "Which fmt verb wraps an error so errors.Is can see through it?", "a": "%w"}, {"q": "Which function checks whether any error in the chain equals a target value?", "a": "errors.Is"}, {"q": "Which function extracts a specific error type from the chain?", "a": "errors.As"}, {"q": "Which built-in stops a panic when called inside a deferred function?", "a": "recover"}, {"q": "Which function combines several errors into one (Go 1.20)?", "a": "errors.Join"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0004-interfaces.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 4</a></span>
+  <span class="next"><a href="0006-generics.html">Next: Generics<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

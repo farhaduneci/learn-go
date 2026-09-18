@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 2: Types, zero values, structs &amp; pointers</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 2 &middot; Part 1 · Go core</p>
+<h1>Types, zero values, structs &amp; pointers</h1>
+
+<p>Static types, zero values and explicit pointers are the biggest mental shift from Python. They're also where Go's performance and predictability come from.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/tour/basics/1">A Tour of Go — Basics</a> and <a href="https://go.dev/tour/moretypes/1">More types: pointers and structs</a>. For depth, <a href="https://go.dev/ref/spec#Types">the spec's Types section</a> is short and readable.
+</div>
+
+<h2 id="static-types-inferred-where-obvious">Static types, inferred where obvious</h2>
+<pre class="go"><code>var count int          // declared, zero value 0
+price := 189.5         // inferred float64
+var qty int64 = 10
+name, ok := &quot;AAPL&quot;, true</code></pre>
+<p>Basic types: <code>bool</code>, <code>string</code>, <code>int</code>/<code>int8</code>…<code>int64</code>, <code>uint</code>…<code>uint64</code>, <code>float32</code>/<code>float64</code>, <code>byte</code> (= <code>uint8</code>), <code>rune</code> (= <code>int32</code>, a Unicode code point). <code>int</code> is 64-bit on 64-bit platforms. <strong>No implicit conversions</strong>: <code>int64(qty) * price</code> won't compile until both sides have the same type. That feels strict for a day and prevents whole classes of bugs.</p>
+<p>Constants are untyped until used, and <code>iota</code> builds enums:</p>
+<pre class="go"><code>type Side int
+
+const (
+    Buy Side = iota + 1 // 1
+    Sell                // 2
+)</code></pre>
+<h2 id="zero-values-instead-of-none">Zero values instead of None</h2>
+<p>Every type has a <strong>zero value</strong>, and every variable starts at it: <code>0</code>, <code>""</code>, <code>false</code>, <code>nil</code> for pointers/slices/maps/channels/interfaces/functions, and a struct whose fields are all zero. There is no "uninitialized" state and no <code>None</code> sprinkled through the code.</p>
+<p>Idiomatic Go designs types so the <strong>zero value is useful</strong>: <code>var mu sync.Mutex</code> is an unlocked mutex, <code>var b strings.Builder</code> is an empty builder, <code>var s []int</code> can be appended to. Aim for the same in custom types.</p>
+<h2 id="structs-not-classes">Structs, not classes</h2>
+<pre class="go"><code>type Account struct {
+    ID      string
+    Balance Cents // named type over int64
+}
+
+a := Account{ID: &quot;acc-1&quot;}   // Balance is 0
+p := &amp;Account{ID: &quot;acc-2&quot;}  // pointer to a new Account
+p.Balance = 100             // automatic dereference: no p-&gt;Balance</code></pre>
+<p>There are no constructors. By convention a function named <code>NewAccount(...) *Account</code> builds one when setup is needed. No inheritance either; lesson 4 shows composition instead.</p>
+<h2 id="methods-and-receivers">Methods and receivers</h2>
+<pre class="go"><code>type Cents int64
+
+func (c Cents) String() string { ... }         // value receiver: gets a copy
+func (a *Account) Deposit(amount Cents) {     // pointer receiver: can modify
+    a.Balance += amount
+}</code></pre>
+<p>Rules of thumb:</p>
+<ul>
+<li>Use a <strong>pointer receiver</strong> if the method mutates, if the struct is large, or if it contains a <code>sync.Mutex</code> (copying a mutex is a bug that <code>go vet</code> catches).</li>
+<li>Keep receivers consistent. If one method needs a pointer, make them all pointers.</li>
+<li>Value receivers suit small immutable types like <code>Cents</code>, <code>time.Time</code> and <code>Side</code>.</li>
+</ul>
+<h2 id="pointers-explicit-references">Pointers: explicit references</h2>
+<p>Python passes references to objects implicitly. Go passes <strong>everything by value</strong> (a copy), and uses pointers when sharing is wanted:</p>
+<pre class="go"><code>func Swap(a, b *int) { *a, *b = *b, *a }
+
+x, y := 1, 2
+Swap(&amp;x, &amp;y) // &amp; = address-of, * = dereference</code></pre>
+<p>There's no pointer arithmetic (outside <code>unsafe</code>), and the garbage collector manages lifetimes. Returning a pointer to a local variable is fine: the compiler notices it <strong>escapes</strong> and allocates it on the heap.</p>
+<pre class="sh"><code>go build -gcflags=-m ./...   # prints escape-analysis decisions: &quot;moved to heap: x&quot;</code></pre>
+<p>Stack allocation is nearly free, and heap allocation costs GC work later. This is the first lever for low-latency Go, covered in lesson 18.</p>
+<h2 id="money-is-never-a-float">Money is never a float</h2>
+<p><code>0.1 + 0.2 != 0.3</code> in every IEEE-754 language. Trading and ledger systems represent money as <strong>integers in the smallest unit</strong> (cents, or micro-units for crypto and FX) or as a decimal type (<code>shopspring/decimal</code>). This track uses <code>int64</code> cents throughout, and interviewers at trading firms notice when someone reaches for <code>float64</code> for prices.</p>
+<h2 id="closures">Closures</h2>
+<p>Functions are values, and closures capture variables by reference, just like Python:</p>
+<pre class="go"><code>func NewCounter() func() int {
+    n := 0
+    return func() int { n++; return n }
+}</code></pre>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/02-types-pointers/README.md"><code>exercises/02-types-pointers</code></a>: a <code>Cents</code> type with <code>String()</code>, an <code>Account</code> with a deliberately wrong value receiver to fix, pointer swapping, and a closure counter.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "What is the zero value of a string?", "a": "\"\""}, {"q": "What is the zero value of a pointer, slice, map or channel?", "a": "nil"}, {"q": "Which operator takes the address of a variable?", "a": "&amp;"}, {"q": "To let a method modify its receiver, the receiver must be a what?", "a": "pointer"}, {"q": "What compiler analysis decides whether a variable lives on the stack or the heap?", "a": "escape analysis"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0001-toolchain.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 1</a></span>
+  <span class="next"><a href="0003-slices-maps-strings.html">Next: Slices, maps, strings &amp; runes<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

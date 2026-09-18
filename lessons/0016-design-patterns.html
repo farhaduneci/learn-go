@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 16: Design patterns in Go</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 16 &middot; Part 3 · Senior Go</p>
+<h1>Design patterns in Go</h1>
+
+<p>Classic patterns look different in Go. With first-class functions, implicit interfaces and no inheritance, most Gang-of-Four patterns shrink to a few lines, and a few Go-specific ones come up in every codebase.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://dave.cheney.net/2014/10/17/functional-options-for-friendly-apis">Functional options for friendly APIs</a> (Dave Cheney), <a href="https://go.dev/blog/errors-are-values">Errors are values</a>, and <a href="https://github.com/uber-go/guide/blob/master/style.md">Uber Go Style Guide</a> (sections on functional options, embedding, and interfaces).
+</div>
+
+<h2 id="functional-options">Functional options</h2>
+<p>The answer to "constructors with many optional settings" when there are no default arguments or overloads:</p>
+<pre class="go"><code>type Option func(*Client) error
+
+func WithTimeout(d time.Duration) Option {
+    return func(c *Client) error {
+        if d &lt;= 0 {
+            return errors.New(&quot;timeout must be positive&quot;)
+        }
+        c.Timeout = d
+        return nil
+    }
+}
+
+func NewClient(baseURL string, opts ...Option) (*Client, error) {
+    c := &amp;Client{BaseURL: baseURL, Timeout: 5 * time.Second, Retries: 3} // defaults
+    for _, opt := range opts {
+        if err := opt(c); err != nil {
+            return nil, err
+        }
+    }
+    return c, nil
+}
+
+c, err := NewClient(url, WithTimeout(time.Second), WithRetries(0))</code></pre>
+<p>It's backwards compatible (adding an option breaks no caller), self-documenting, and has sensible defaults. The simpler alternative is a <strong>config struct</strong> whose zero values mean "default". Both are idiomatic: use options for libraries, and a config struct when settings come from a file.</p>
+<h2 id="middleware-decorator">Middleware (decorator)</h2>
+<p>Wrap a function type in another of the same type:</p>
+<pre class="go"><code>type Handler func(ctx context.Context, o Order) error
+type Middleware func(next Handler) Handler
+
+func Chain(h Handler, mws ...Middleware) Handler {
+    for i := len(mws) - 1; i &gt;= 0; i-- { // wrap in reverse so mws[0] is outermost
+        h = mws[i](h)
+    }
+    return h
+}
+
+h := Chain(placeOrder, Recover, Logging, Validate, RateLimit)</code></pre>
+<p><code>net/http</code> middleware is exactly this with <code>http.Handler</code>. So are gRPC interceptors. Cross-cutting concerns such as logging, metrics, auth, validation and panic recovery live here instead of in every handler.</p>
+<h2 id="strategy-interface-or-func">Strategy = interface or func</h2>
+<p>A strategy is an interface (<code>FeeModel</code>, lesson 4) or just a function value (<code>func(int64) int64</code>). When the "interface" would have one method and no state, <strong>a func type is simpler</strong>: <code>sort.Slice</code> takes <code>less func(i, j int) bool</code>, and <code>http.HandlerFunc</code> adapts a function to an interface.</p>
+<h2 id="observer-pub-sub-with-backpressure">Observer / pub-sub with backpressure</h2>
+<p>Go's version uses channels, and the important design question is <strong>what happens when a subscriber is slow</strong>:</p>
+<pre class="go"><code>func (b *Bus) Publish(e Event) {
+    b.mu.RLock()
+    defer b.mu.RUnlock()
+    for ch := range b.subs[e.Topic] {
+        select {
+        case ch &lt;- e:        // delivered into the subscriber&#39;s buffer
+        default:             // buffer full: drop for THIS subscriber, count it
+            b.dropped.Add(1)
+        }
+    }
+}</code></pre>
+<p>The choices are block (one slow consumer stalls everyone), drop (with metrics), coalesce (keep only the latest price per symbol), or disconnect the slow client. Market-data fan-out usually drops or coalesces. Order and fill streams must never drop, so they block or halt. Saying this out loud in a system-design interview scores points.</p>
+<h2 id="other-patterns-that-show-up">Other patterns that show up</h2>
+<ul>
+<li><strong>Constructor + unexported struct fields</strong> for invariants (lesson 7).</li>
+<li><strong>Adapter:</strong> <code>http.HandlerFunc(f)</code> turns a func into an interface.</li>
+<li><strong>Singleton:</strong> a package-level <code>sync.OnceValue</code>, used sparingly because it's global state.</li>
+<li><strong>Builder:</strong> rare, since functional options or struct literals cover it.</li>
+<li><strong>Generator/iterator:</strong> <code>iter.Seq[T]</code> (Go 1.23) lets custom collections work with <code>for range</code>:</li>
+</ul>
+<pre class="go"><code>func (b *Book) Levels() iter.Seq[Level] {
+    return func(yield func(Level) bool) {
+        for _, l := range b.levels {
+            if !yield(l) { return }
+        }
+    }
+}
+for l := range book.Levels() { ... }</code></pre>
+<h2 id="what-not-to-port-from-python-or-java">What not to port from Python or Java</h2>
+<ul>
+<li>Abstract base classes and deep hierarchies. Use small interfaces plus composition instead.</li>
+<li>Getters and setters for every field. Export the field, or give the type real behaviour.</li>
+<li><code>Manager</code>/<code>Helper</code>/<code>Util</code> types. They're named after nothing in the domain.</li>
+<li>Interfaces declared before a second implementation (or a test fake) exists.</li>
+</ul>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/16-design-patterns/README.md"><code>exercises/16-design-patterns</code></a>: functional options with validation, an ordered middleware chain with validation and panic recovery, and a non-blocking pub/sub bus with drop accounting.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "A variadic list of func(*T) arguments used to configure a constructor is which pattern?", "a": "functional options"}, {"q": "In Chain(h, A, B), which middleware runs first?", "a": "A"}, {"q": "When a pub/sub subscriber is slow, a non-blocking publisher uses select with which clause?", "a": "default"}, {"q": "Which GoF pattern is a type implementing an interface by wrapping another implementation of it?", "a": "decorator"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0015-refactoring.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 15</a></span>
+  <span class="next"><a href="0017-services.html">Next: Building services: net/http, JSON, graceful shutdown, gRPC<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 7: Packages, visibility &amp; project layout</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 7 &middot; Part 1 · Go core</p>
+<h1>Packages, visibility &amp; project layout</h1>
+
+<p>In Go, package boundaries are the main design tool. There are no classes to hide behind, so what a package exports is its whole contract.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/doc/modules/layout">Organizing a Go module</a> (official) and <a href="https://go.dev/blog/package-names">Package names</a> (go.dev blog). The canonical style guide is <a href="https://google.github.io/styleguide/go/">Google's Go Style Guide</a>.
+</div>
+
+<h2 id="visibility-is-one-rule">Visibility is one rule</h2>
+<p><strong>Capitalised = exported</strong>, visible to other packages. Lower-case = package-private. That covers types, functions, methods, struct fields and constants. There's no <code>protected</code> and no <code>_underscore</code> convention, and the compiler enforces it.</p>
+<p>Because the <strong>package</strong> is the encapsulation unit, keep internal state unexported and expose behaviour:</p>
+<pre class="go"><code>type Ledger struct {
+    balances map[string]int64 // callers can&#39;t reach in and break invariants
+}
+
+func New() *Ledger { return &amp;Ledger{balances: make(map[string]int64)} }
+func (l *Ledger) Accounts() []string { return slices.Sorted(maps.Keys(l.balances)) } // a copy</code></pre>
+<p>Returning an internal slice or map directly hands callers a way to mutate state. Return a copy.</p>
+<h2 id="naming">Naming</h2>
+<ul>
+<li>Package names are <strong>short, lower-case, one word</strong>: <code>ledger</code>, <code>orderbook</code>, <code>http</code>. Never <code>utils</code>, <code>common</code>, <code>helpers</code>, <code>models</code>.</li>
+<li>Names are read <strong>with the package</strong>, so avoid stutter: <code>ledger.New</code>, not <code>ledger.NewLedger</code>; <code>http.Server</code>, not <code>http.HTTPServer</code>.</li>
+<li>Initialisms keep one case: <code>ID</code>, <code>URL</code>, <code>HTTPClient</code>, <code>userID</code>.</li>
+<li>Getters drop <code>Get</code>: <code>acct.Balance()</code>, not <code>acct.GetBalance()</code>.</li>
+<li>Receivers are one or two letters (<code>l *Ledger</code>), never <code>self</code> or <code>this</code>.</li>
+</ul>
+<h2 id="a-real-service-layout">A real service layout</h2>
+<pre><code>learn-go/
+├── go.mod
+├── cmd/
+│   └── engine/main.go        # tiny: parse config, wire dependencies, run
+├── internal/                 # importable only inside this module
+│   ├── orderbook/            # domain logic, no I/O
+│   ├── api/                  # HTTP handlers
+│   └── store/                # database access
+└── pkg/                      # optional: code meant for OTHER modules (often skipped)</code></pre>
+<ul>
+<li><strong>Start flat.</strong> A small service can be a single <code>main</code> package. Split when a boundary appears, not before.</li>
+<li><strong><code>internal/</code></strong> is enforced by the compiler: <code>a/b/internal/c</code> can only be imported from <code>a/b/...</code>. It's the right default for application code.</li>
+<li><strong><code>cmd/&lt;name&gt;/main.go</code></strong> holds one directory per binary. Keep <code>main</code> thin so everything else is testable.</li>
+<li>Package by <strong>domain</strong> (<code>orderbook</code>, <code>ledger</code>) rather than by layer (<code>models</code>, <code>controllers</code>).</li>
+<li><strong>No import cycles.</strong> The compiler forbids them. A cycle means the boundary is wrong. Extract the shared piece, or define an interface on the consumer side.</li>
+</ul>
+<h2 id="test-packages">Test packages</h2>
+<p>A <code>_test.go</code> file can use <strong>the same package</strong> (<code>package ledger</code>: white-box, sees unexported names) or an <strong>external test package</strong> (<code>package ledger_test</code>: black-box, only the exported API). External tests prove the API is usable as designed and are good at catching awkward APIs early.</p>
+<h2 id="init-and-package-level-state">init() and package-level state</h2>
+<p><code>func init()</code> runs automatically when a package loads. Use it sparingly: it makes behaviour depend on import order and makes tests harder to write. Package-level mutable variables (like the global map in exercise 15's legacy code) are the main source of untestable Go. Pass dependencies in explicitly.</p>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/07-packages/README.md"><code>exercises/07-packages</code></a>: a double-entry ledger package with an unexported representation, exported sentinel errors, a copy-returning accessor, and black-box tests in <code>ledger_test</code>.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "What makes an identifier exported?", "a": "capital letter"}, {"q": "Packages under which directory name can only be imported by code rooted at its parent?", "a": "internal"}, {"q": "A test file with package foo_test is called what kind of test package?", "a": "external"}, {"q": "Which special function runs automatically when a package is initialised?", "a": "init"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0006-generics.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 6</a></span>
+  <span class="next"><a href="0008-goroutines.html">Next: Goroutines &amp; the scheduler<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 3: Slices, maps, strings &amp; runes</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 3 &middot; Part 1 · Go core</p>
+<h1>Slices, maps, strings &amp; runes</h1>
+
+<p>Slices look like Python lists and behave differently in ways that cause real bugs. The slice header, append and aliasing are standard interview material.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/blog/slices-intro">Go Slices: usage and internals</a> (go.dev blog, ~10 min). Then <a href="https://go.dev/blog/strings">Strings, bytes, runes and characters in Go</a>.
+</div>
+
+<h2 id="arrays-are-values-slices-are-views">Arrays are values, slices are views</h2>
+<p>An <strong>array</strong> has its length in its type (<code>[4]int</code>) and is copied on assignment. It's rarely used directly. A <strong>slice</strong> is a small header of three words that points into an array:</p>
+<pre><code>slice header:  ptr ──► [ 1 | 2 | 3 | 4 | _ | _ ]   backing array
+               len = 4
+               cap = 6</code></pre>
+<pre class="go"><code>s := []int{1, 2, 3}             // literal
+s = make([]int, 0, 100)         // len 0, cap 100: preallocate when the size is known
+t := s[1:3]                     // a new header onto the SAME array</code></pre>
+<p>Because <code>t</code> shares the backing array, <strong>writing <code>t[0]</code> changes <code>s[1]</code></strong>. Python's <code>lst[1:3]</code> makes a copy; Go's doesn't.</p>
+<h2 id="append-and-the-aliasing-trap">append and the aliasing trap</h2>
+<p><code>append</code> writes into spare capacity if there is any, and otherwise allocates a bigger array (roughly doubling) and copies. Always reassign: <code>s = append(s, v)</code>.</p>
+<pre class="go"><code>base := make([]int, 3, 10)
+a := append(base, 1) // fits in cap: writes base&#39;s array at index 3
+b := append(base, 2) // ALSO writes index 3, so a[3] is now 2</code></pre>
+<p>Two slices from the same parent can silently clobber each other. The fixes:</p>
+<ul>
+<li>The <strong>full slice expression</strong> <code>s[lo:hi:hi]</code> sets <code>cap == len</code>, so the next append must copy.</li>
+<li>An explicit copy: <code>c := slices.Clone(s)</code>, or <code>make</code> + <code>copy(dst, src)</code>.</li>
+</ul>
+<p>This bug is common in chunking and batching code, and it's what exercise 03's <code>Chunk</code> test catches.</p>
+<h2 id="nil-vs-empty">nil vs empty</h2>
+<p><code>var s []int</code> is <strong>nil</strong> (len 0, no array). <code>s := []int{}</code> is empty but non-nil. Both work with <code>len</code>, <code>range</code> and <code>append</code>. The difference shows in JSON (<code>null</code> vs <code>[]</code>) and in <code>== nil</code> checks. Return <code>nil</code> for "nothing" unless an API contract says otherwise.</p>
+<h2 id="the-slices-and-maps-packages">The slices and maps packages</h2>
+<p>Since Go 1.21 the standard library covers most of what Python's builtins do:</p>
+<pre class="go"><code>slices.Sort(s); slices.Contains(s, v); slices.Index(s, v)
+slices.Reverse(s); slices.Max(s); slices.Equal(a, b)
+slices.SortFunc(people, func(a, b P) int { return cmp.Compare(a.Age, b.Age) })
+keys := slices.Sorted(maps.Keys(m)) // iterators (Go 1.23)</code></pre>
+<h2 id="maps">Maps</h2>
+<pre class="go"><code>vol := map[string]int{&quot;AAPL&quot;: 50}
+vol[&quot;TSLA&quot;] += 10          // missing key reads as the zero value, so this works
+v, ok := vol[&quot;MSFT&quot;]       // &quot;comma ok&quot; distinguishes missing from zero
+delete(vol, &quot;AAPL&quot;)
+set := map[string]struct{}{} // a set: struct{} takes zero bytes</code></pre>
+<ul>
+<li><strong>Iteration order is randomized on purpose.</strong> Sort keys when output must be deterministic.</li>
+<li>A nil map can be read but <strong>panics on write</strong>. Use <code>make</code> or a literal first.</li>
+<li>Maps are <strong>not safe for concurrent writes</strong>. The runtime crashes with <code>fatal error: concurrent map writes</code>. Lesson 10 fixes that.</li>
+<li>Keys must be comparable: no slices, maps or funcs.</li>
+</ul>
+<h2 id="strings-bytes-and-runes">Strings, bytes and runes</h2>
+<p>A Go string is an <strong>immutable sequence of bytes</strong>, conventionally UTF-8. <code>len("héllo")</code> is 6 (bytes), not 5.</p>
+<pre class="go"><code>s := &quot;héllo&quot;
+s[1]                // a byte (0xc3), not &#39;é&#39;
+for i, r := range s // r is a rune (code point); i is its byte offset
+[]rune(s)           // decode to code points: reverse/index by character
+utf8.RuneCountInString(s) // 5</code></pre>
+<p>Building strings in a loop with <code>+=</code> allocates a new string each time, O(n²). Use <code>strings.Builder</code> (lesson 18). <code>strings</code> has the usual helpers: <code>Fields</code>, <code>Split</code>, <code>Cut</code>, <code>TrimSpace</code>, <code>ToLower</code>, <code>HasPrefix</code>, <code>Join</code>.</p>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/03-slices-maps-strings/README.md"><code>exercises/03-slices-maps-strings</code></a>: reversing without mutating, order-preserving dedupe with a set, word frequency, rune-aware reversal, aliasing-safe chunking, and top-k with a deterministic sort.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "A slice header holds a pointer, a length and a what?", "a": "capacity"}, {"q": "Iterating a string with range yields bytes or runes?", "a": "runes"}, {"q": "Is map iteration order in Go deterministic?", "a": "no"}, {"q": "Which full slice expression caps capacity so append must copy?", "a": "s[lo:hi:max]"}, {"q": "What does len() of a string count?", "a": "bytes"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0002-types-pointers.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 2</a></span>
+  <span class="next"><a href="0004-interfaces.html">Next: Methods, interfaces &amp; composition<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

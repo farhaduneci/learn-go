@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 18: Performance: benchmarks, pprof, allocations &amp; the GC</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 18 &middot; Part 3 · Senior Go</p>
+<h1>Performance: benchmarks, pprof, allocations &amp; the GC</h1>
+
+<p>Low latency and high throughput come up in every trading-platform job posting. In Go the work is mostly measurement, allocation control and working with the garbage collector. This lesson is the toolkit.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/doc/diagnostics">Diagnostics</a> (go.dev), <a href="https://go.dev/doc/gc-guide">A Guide to the Go Garbage Collector</a> (essential), <a href="https://go.dev/blog/pprof">Profiling Go Programs</a>, and <a href="https://go.dev/doc/pgo">Profile-guided optimization</a>. Book: <em>Efficient Go</em> (Bartłomiej Płotka, O'Reilly).
+</div>
+
+<h2 id="rule-zero-measure">Rule zero: measure</h2>
+<p>Intuition about Go performance is often wrong. Changes that look faster frequently aren't, and the real cost often turns out to be an allocation nobody noticed. The loop is: <strong>benchmark → profile → change one thing → benchmark again → benchstat.</strong></p>
+<pre class="sh"><code>go test -run &#39;^$&#39; -bench BenchmarkSubmit -benchmem -count 10 ./orderbook &gt; old.txt
+# ...change...
+go test -run &#39;^$&#39; -bench BenchmarkSubmit -benchmem -count 10 ./orderbook &gt; new.txt
+benchstat old.txt new.txt</code></pre>
+<p>Three numbers matter: <strong>ns/op</strong>, <strong>B/op</strong> and <strong>allocs/op</strong>. On a hot path, allocs/op is often the one to drive down first.</p>
+<h2 id="pprof">pprof</h2>
+<pre class="sh"><code>go test -bench . -cpuprofile cpu.out -memprofile mem.out ./orderbook
+go tool pprof -http=:8080 cpu.out          # flame graph, top, source view
+go tool pprof -sample_index=alloc_space mem.out</code></pre>
+<p>In a running service, <code>import _ "net/http/pprof"</code> on an <strong>internal admin port</strong> exposes <code>/debug/pprof/</code>. Profiles to know:</p>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Profile</th>
+<th>Answers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CPU</td>
+<td>where time is spent</td>
+</tr>
+<tr>
+<td>heap / allocs</td>
+<td>what allocates, and what stays live</td>
+</tr>
+<tr>
+<td>goroutine</td>
+<td>what every goroutine is doing (leaks, deadlocks)</td>
+</tr>
+<tr>
+<td>mutex / block</td>
+<td>where goroutines wait on locks or channels</td>
+</tr>
+<tr>
+<td>execution trace (<code>go tool trace</code>)</td>
+<td>scheduler latency, GC pauses, per-goroutine timelines</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Continuous profiling</strong> (Pyroscope, Grafana, Google Cloud Profiler, Datadog) samples production all the time, so a regression can be compared to last week's profile. It's listed as a plus in trading-platform job postings.</p>
+<h2 id="allocations-and-escape-analysis">Allocations and escape analysis</h2>
+<p>Stack allocation is essentially free and disappears on return. Heap allocation costs at allocation time <strong>and</strong> later, in GC work. Values escape to the heap when:</p>
+<ul>
+<li>a pointer to them outlives the function (returned, or stored in a heap object);</li>
+<li>they're stored in an interface (<code>any</code>, <code>fmt.Println(x)</code>, <code>slog.Info(..., "k", v)</code>);</li>
+<li>they're captured by a closure that escapes, such as a goroutine;</li>
+<li>their size is unknown at compile time or too large.</li>
+</ul>
+<pre class="sh"><code>go build -gcflags=-m ./orderbook 2&gt;&amp;1 | grep -E &#39;escapes|moved to heap&#39;</code></pre>
+<p>Common fixes on hot paths:</p>
+<ul>
+<li><strong>Preallocate</strong>: <code>make([]T, 0, n)</code>, <code>make(map[K]V, n)</code>, <code>strings.Builder.Grow(n)</code>.</li>
+<li><strong>Reuse buffers</strong>: take a <code>dst []T</code> parameter and <code>append</code> to it (<code>strconv.AppendInt</code>, <code>SubmitInto(o, dst)</code>).</li>
+<li><strong>Avoid interface boxing</strong> in tight loops. Use concrete types, typed <code>slog.Attr</code>s, and no <code>fmt</code> on hot paths.</li>
+<li><strong><code>sync.Pool</code></strong> for short-lived objects allocated per request (buffers, encoders).</li>
+<li>Pass small structs <strong>by value</strong>. A pointer can force the struct to escape.</li>
+</ul>
+<h2 id="memory-layout-and-the-cpu-cache">Memory layout and the CPU cache</h2>
+<p>At low latency, <strong>cache misses</strong> often cost more than instructions. A main-memory load is ~100 ns; an L1 hit is ~1 ns.</p>
+<ul>
+<li>Order struct fields <strong>largest to smallest</strong> to cut padding (exercise 18: 32 → 24 bytes). The <code>fieldalignment</code> analyzer flags this.</li>
+<li>Prefer <strong>slices of values</strong> over slices of pointers for data iterated in bulk. Contiguous memory prefetches well, and pointer chasing doesn't. The capstone's sorted-slice price levels are chosen for this.</li>
+<li>Keep hot and cold fields apart, and pad contended atomics to avoid <strong>false sharing</strong> (lesson 10).</li>
+</ul>
+<h2 id="the-garbage-collector">The garbage collector</h2>
+<p>Go's GC is <strong>concurrent, tri-colour mark-and-sweep, non-generational and non-moving</strong>. Stop-the-world pauses are typically well under a millisecond. The cost shows up instead as <strong>CPU</strong> spent marking (roughly 25% of GOMAXPROCS while a cycle runs) and as <strong>mark assists</strong>, which make allocating goroutines do GC work. Those assists hurt tail latency. Go 1.26 turns on the <strong>Green Tea</strong> collector by default, which scans memory in a more cache-friendly way and cuts GC CPU cost noticeably on many workloads.</p>
+<p>The two settings:</p>
+<ul>
+<li><code>GOGC=100</code> (default): the next GC starts when the heap grows 100% over the live heap after the last one. Higher means fewer GCs and more memory.</li>
+<li><code>GOMEMLIMIT=2GiB</code> (Go 1.19+): a soft limit. The GC runs more often as the limit gets close. In containers, set it to ~90% of the memory limit. A common low-latency setup is <code>GOGC=off</code> or a high GOGC, <strong>plus</strong> GOMEMLIMIT, so the GC only runs when memory really needs reclaiming.</li>
+</ul>
+<p>The biggest GC improvement is still <strong>allocating less</strong>: less garbage means fewer cycles.</p>
+<h2 id="other-levers">Other levers</h2>
+<ul>
+<li><strong>PGO</strong>: put a production CPU profile at <code>default.pgo</code> in the main package, and <code>go build</code> uses it for inlining and devirtualisation decisions. That's typically 2–14% for free.</li>
+<li><strong><code>GOMAXPROCS</code></strong> is container-aware since Go 1.25. <code>runtime.LockOSThread</code> plus CPU pinning are extreme measures for dedicated hot loops.</li>
+<li><strong>cgo</strong> (calling C/C++) costs tens of nanoseconds per call and complicates builds and profiling. Use it only when a C/C++ library is genuinely required, and batch the calls. Trading shops that mix Go and C++ often keep the ultra-low-latency core in C++ and use Go around it for gateways, risk, the OMS and APIs.</li>
+</ul>
+<h2 id="latency-is-a-distribution">Latency is a distribution</h2>
+<p>Report <strong>p50, p99 and p99.9</strong>, never the average. One GC assist or lock convoy that hits 1% of orders is invisible in a mean and very visible to a client. Record latencies in a histogram (exercise 19) and load-test at realistic concurrency.</p>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/18-performance/README.md"><code>exercises/18-performance</code></a>: fix struct padding, get a VWAP hot path to zero allocations, and rewrite string building from 4,000 allocations to one, with budgets enforced by <code>testing.AllocsPerRun</code>. Then profile it with pprof and compare with benchstat.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "Which tool compares benchmark results statistically?", "a": "benchstat"}, {"q": "Which environment variable sets a soft memory limit for the GC?", "a": "GOMEMLIMIT"}, {"q": "Which build flag prints escape analysis decisions?", "a": "-gcflags=-m"}, {"q": "Which sync type reuses temporary objects to reduce allocations?", "a": "sync.Pool"}, {"q": "Using a CPU profile to guide compiler optimizations is abbreviated as what?", "a": "PGO"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0017-services.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 17</a></span>
+  <span class="next"><a href="0019-observability.html">Next: Observability: slog, metrics, tracing, profiling<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

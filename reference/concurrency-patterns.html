@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Reference: Concurrency patterns &amp; rules</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Reference &middot; Quick Lookup</p>
+<h1>Concurrency patterns &amp; rules</h1>
+
+<p class="citation">Compressed from lessons 8–13. Sources of truth: <a href="https://go.dev/ref/mem">The Go Memory Model</a> and <a href="https://go.dev/blog/pipelines">Pipelines and cancellation</a>.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<h2 id="the-rules">The rules</h2>
+<ol type="1">
+<li>Every goroutine has a known <strong>exit condition</strong> and a known <strong>waiter</strong>.</li>
+<li>The <strong>sender closes</strong>. With many senders, a coordinator closes after <code>wg.Wait()</code>.</li>
+<li>Every blocking send or receive in a long-lived goroutine sits in a <code>select</code> with <code>&lt;-ctx.Done()</code>.</li>
+<li>A result channel that may be abandoned is <strong>buffered to the number of senders</strong>.</li>
+<li>Shared mutable state: a mutex, <strong>or</strong> one owner goroutine, <strong>or</strong> per-goroutine slots. Never "probably fine".</li>
+<li><code>ctx</code> first, <code>defer cancel()</code> always, and never store a context in a struct.</li>
+<li><code>go test -race</code> in CI, plus <code>goleak</code> in concurrent packages.</li>
+</ol>
+<h2 id="channel-semantics">Channel semantics</h2>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Operation</th>
+<th>nil</th>
+<th>open</th>
+<th>closed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ch &lt;- v</code></td>
+<td>blocks forever</td>
+<td>blocks until received or buffered</td>
+<td><strong>panic</strong></td>
+</tr>
+<tr>
+<td><code>&lt;-ch</code></td>
+<td>blocks forever</td>
+<td>blocks until value</td>
+<td>zero value, <code>ok == false</code></td>
+</tr>
+<tr>
+<td><code>close(ch)</code></td>
+<td><strong>panic</strong></td>
+<td>ok</td>
+<td><strong>panic</strong></td>
+</tr>
+</tbody>
+</table>
+<h2 id="wait-for-n-goroutines">Wait for N goroutines</h2>
+<pre class="go"><code>var wg sync.WaitGroup
+for i, x := range xs {
+    wg.Go(func() { out[i] = f(x) }) // Go 1.25+
+}
+wg.Wait()</code></pre>
+<h2 id="bounded-fail-fast-parallelism">Bounded, fail-fast parallelism</h2>
+<pre class="go"><code>g, ctx := errgroup.WithContext(ctx)
+g.SetLimit(n)
+for i, x := range xs {
+    g.Go(func() error { r, err := f(ctx, x); out[i] = r; return err })
+}
+err := g.Wait()</code></pre>
+<h2 id="generator-pipeline-stage">Generator / pipeline stage</h2>
+<pre class="go"><code>func stage(ctx context.Context, in &lt;-chan T) &lt;-chan U {
+    out := make(chan U)
+    go func() {
+        defer close(out)
+        for v := range in {
+            select {
+            case out &lt;- transform(v):
+            case &lt;-ctx.Done():
+                return
+            }
+        }
+    }()
+    return out
+}</code></pre>
+<h2 id="fan-in">Fan-in</h2>
+<pre class="go"><code>func merge[T any](cs ...&lt;-chan T) &lt;-chan T {
+    out := make(chan T)
+    var wg sync.WaitGroup
+    for _, c := range cs {
+        wg.Go(func() { for v := range c { out &lt;- v } })
+    }
+    go func() { wg.Wait(); close(out) }()
+    return out
+}</code></pre>
+<h2 id="timeout-without-a-leak">Timeout without a leak</h2>
+<pre class="go"><code>done := make(chan T, 1) // buffered!
+go func() { done &lt;- slow() }()
+select {
+case v := &lt;-done:
+case &lt;-time.After(d):
+}</code></pre>
+<h2 id="first-response-wins">First response wins</h2>
+<pre class="go"><code>ctx, cancel := context.WithCancel(ctx)
+defer cancel()
+res := make(chan result, len(backends))
+for _, b := range backends {
+    go func() { v, err := b(ctx); res &lt;- result{v, err} }()
+}</code></pre>
+<h2 id="semaphore">Semaphore</h2>
+<pre class="go"><code>sem := make(chan struct{}, n)
+sem &lt;- struct{}{}
+defer func() { &lt;-sem }()</code></pre>
+<h2 id="single-writer-owner-goroutine">Single-writer owner goroutine</h2>
+<pre class="go"><code>cmds := make(chan func(*State), 1024)
+go func() {
+    st := newState() // only this goroutine touches st: no locks
+    for cmd := range cmds { cmd(st) }
+}()</code></pre>
+<h2 id="per-key-ordering-cross-key-parallelism">Per-key ordering, cross-key parallelism</h2>
+<pre class="go"><code>idx := fnv32(key) % uint32(len(workers))
+workers[idx] &lt;- msg // each worker processes its channel sequentially</code></pre>
+<h2 id="idempotent-close-stop">Idempotent close / stop</h2>
+<pre class="go"><code>var once sync.Once
+stop := func() { once.Do(func() { close(done) }) }</code></pre>
+<h2 id="glossary-anchors">Glossary anchors</h2>
+<table>
+<colgroup>
+<col style="width: 50%" />
+<col style="width: 50%" />
+</colgroup>
+<thead>
+<tr>
+<th>Term</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GMP</td>
+<td>Goroutine, Machine (OS thread), Processor (run queue + right to run Go code)</td>
+</tr>
+<tr>
+<td>happens-before</td>
+<td>ordering guarantee from sync ops; without it, no visibility guarantee</td>
+</tr>
+<tr>
+<td>data race</td>
+<td>concurrent access, ≥1 write, no sync: undefined behaviour</td>
+</tr>
+<tr>
+<td>goroutine leak</td>
+<td>goroutine blocked forever; its memory is never freed</td>
+</tr>
+<tr>
+<td>backpressure</td>
+<td>slow consumer slows producer (bounded buffer) instead of unbounded growth</td>
+</tr>
+</tbody>
+</table>
+
+<div class="lesson-nav">
+  <span><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a></span>
+  <span></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 13: Concurrency bugs: leaks, deadlocks, races</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 13 &middot; Part 2 · Concurrency</p>
+<h1>Concurrency bugs: leaks, deadlocks, races</h1>
+
+<p>Senior engineers are hired partly to find bugs like these before production does. This lesson catalogues the failure modes behind nearly every Go concurrency incident and the tools that expose each one.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://songlh.github.io/paper/go-study.pdf">Understanding Real-World Concurrency Bugs in Go</a> (ASPLOS 2019; read sections 1, 5 and 6) and <a href="https://github.com/uber-go/goleak">uber-go/goleak</a>. Also <a href="https://www.uber.com/blog/data-race-patterns-in-go/">Data Race Patterns in Go</a> (Uber engineering).
+</div>
+
+<h2 id="goroutine-leaks">1. Goroutine leaks</h2>
+<p>A goroutine blocked forever on a channel operation is never collected, and neither is everything it references. Leaks grow slowly until the pod gets OOM-killed. The research study above found that <strong>blocking bugs are more common than races</strong> in real Go code, and most of them involve channels.</p>
+<p>Typical causes:</p>
+<ul>
+<li>A sender whose receiver gave up (the unbuffered-timeout bug in lesson 9, or first-result-wins with an unbuffered channel).</li>
+<li>A receiver waiting on a channel nobody will ever close.</li>
+<li>A worker without a <code>ctx.Done()</code> case, after the consumer stopped reading.</li>
+</ul>
+<p>Detection:</p>
+<pre class="go"><code>func TestMain(m *testing.M) { goleak.VerifyTestMain(m) } // whole package
+defer goleak.VerifyNone(t)                              // one test</code></pre>
+<p>In production, watch the <code>go_goroutines</code> metric, which should be flat under steady load, and pull <code>/debug/pprof/goroutine?debug=1</code> to see where goroutines are parked.</p>
+<h2 id="deadlocks">2. Deadlocks</h2>
+<ul>
+<li><strong>Lock ordering:</strong> goroutine A locks X then Y, while B locks Y then X. Fix it with one global order, for example by account ID (exercise 13).</li>
+<li><strong>Re-locking:</strong> Go mutexes aren't reentrant. A method holding <code>mu</code> that calls another method which also locks <code>mu</code> hangs.</li>
+<li><strong>Lock held across a channel send or a callback:</strong> the receiver needs the same lock, so both wait on each other.</li>
+<li><strong>Unbuffered send with no receiver</strong> in the same goroutine: <code>ch &lt;- v; &lt;-ch</code> blocks forever.</li>
+</ul>
+<p>If <strong>every</strong> goroutine is blocked, the runtime detects it: <code>fatal error: all goroutines are asleep - deadlock!</code>. Partial deadlocks, where some goroutines still run, aren't detected, so the process just stops making progress. Send <code>SIGQUIT</code> (Ctrl-\) or hit <code>/debug/pprof/goroutine?debug=2</code> and read the stacks: two goroutines each in <code>sync.(*Mutex).Lock</code>, waiting on each other's lock, is the signature.</p>
+<h2 id="data-races">3. Data races</h2>
+<ul>
+<li>Shared variables written from goroutines (<code>err = ...</code> inside <code>wg.Go</code>). Use a mutex, per-goroutine slots, or <code>errgroup</code>.</li>
+<li>Maps written concurrently. These crash outright.</li>
+<li>Slices appended from several goroutines. <code>append</code> isn't atomic.</li>
+<li>Reading a struct while another goroutine updates it field by field.</li>
+<li>Capturing a loop variable before Go 1.22, still common in older codebases.</li>
+</ul>
+<p><code>go test -race</code> in CI is non-negotiable. Stress tests that run the concurrent path many times (<code>-count=100</code>) make rare interleavings show up.</p>
+<h2 id="misuse-panics">4. Misuse panics</h2>
+<ul>
+<li><strong>Double close</strong> of a channel: use <code>sync.Once</code>, or restructure so exactly one owner closes.</li>
+<li><strong>Send on a closed channel:</strong> a sender outlived its owner's shutdown. Fix the ownership so the channel's owner decides when sends stop.</li>
+<li><strong><code>sync.WaitGroup</code> negative counter:</strong> <code>Done</code> called more times than <code>Add</code>.</li>
+<li><strong>Copying a mutex or WaitGroup</strong> by value: <code>go vet</code> catches it.</li>
+</ul>
+<h2 id="a-debugging-checklist">A debugging checklist</h2>
+<ol type="1">
+<li>Can it be reproduced under <code>-race</code>, with <code>-count=N</code> and <code>GOMAXPROCS=1</code> or <code>=many</code>?</li>
+<li>Take a goroutine dump. Which goroutines exist, and what is each one blocked on?</li>
+<li>For every channel involved: who sends, who closes, and who stops reading first?</li>
+<li>For every lock: which locks does this goroutine already hold here?</li>
+<li>Write the failing test <strong>first</strong>, then fix, then keep the test.</li>
+</ol>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/13-concurrency-bugs/README.md"><code>exercises/13-concurrency-bugs</code></a>: four functions, four classic bugs (leak, lock-order deadlock, data race, double close). Diagnose each from its tool output, fix it minimally, and name it in a comment.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "When every goroutine is blocked, the runtime&#x27;s fatal error reads: all goroutines are asleep - what?", "a": "deadlock!"}, {"q": "Which signal makes a Go program dump all goroutine stacks?", "a": "SIGQUIT"}, {"q": "Which Uber library fails a test if goroutines are left running?", "a": "goleak"}, {"q": "The classic fix for two locks acquired in opposite orders is a global lock what?", "a": "ordering"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0012-patterns.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 12</a></span>
+  <span class="next"><a href="0014-testing.html">Next: Testing like a Go team<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

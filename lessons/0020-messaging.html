@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 20: Messaging from Go: Kafka, NATS &amp; delivery guarantees</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 20 &middot; Part 3 · Senior Go</p>
+<h1>Messaging from Go: Kafka, NATS &amp; delivery guarantees</h1>
+
+<p>Job postings for trading platforms ask for experience with message queues and brokers. This lesson covers the Go-side mechanics (clients, consumer loops, acks, idempotency, ordering by key) that make a consumer correct under at-least-once delivery. Broker internals and system design belong to a separate system-design track.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://docs.nats.io/nats-concepts/jetstream">NATS JetStream concepts</a>, <a href="https://kafka.apache.org/documentation/#semantics">Kafka — Message Delivery Semantics</a>, and the Go clients <a href="https://github.com/nats-io/nats.go">nats.go</a> and <a href="https://github.com/twmb/franz-go">franz-go</a>. Background: <em>Designing Data-Intensive Applications</em>, chapter 11.
+</div>
+
+<h2 id="why-brokers-show-up-everywhere-in-trading">Why brokers show up everywhere in trading</h2>
+<p>Order entry, the matching engine, risk checks, market data, the ledger and client notifications are separate services. Brokers decouple them in time (a consumer can be down briefly), in rate (bursts are buffered), and in fan-out (one fill feeds positions, P&amp;L, notifications and audit). The common ones:</p>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th></th>
+<th>Kafka</th>
+<th>NATS / JetStream</th>
+<th>Google Pub/Sub</th>
+<th>RabbitMQ</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Model</td>
+<td>partitioned, replicated log</td>
+<td>subjects; JetStream adds persisted streams</td>
+<td>managed topics/subscriptions</td>
+<td>queues + exchanges</td>
+</tr>
+<tr>
+<td>Ordering</td>
+<td>per partition</td>
+<td>per stream/consumer</td>
+<td>optional per ordering key</td>
+<td>per queue</td>
+</tr>
+<tr>
+<td>Replay</td>
+<td>yes (offsets)</td>
+<td>yes (JetStream)</td>
+<td>limited (seek)</td>
+<td>no</td>
+</tr>
+<tr>
+<td>Go client</td>
+<td>franz-go, confluent-kafka-go (cgo), segmentio/kafka-go</td>
+<td>nats.go (official)</td>
+<td>cloud.google.com/go/pubsub</td>
+<td>amqp091-go</td>
+</tr>
+</tbody>
+</table>
+<p>NATS is itself written in Go and is common in low-latency Go shops. Kafka is the most common event log overall.</p>
+<h2 id="delivery-guarantees">Delivery guarantees</h2>
+<ul>
+<li><strong>At-most-once:</strong> ack before processing. A crash loses the message.</li>
+<li><strong>At-least-once:</strong> ack <strong>after</strong> processing succeeds. A crash between processing and ack means <strong>redelivery</strong>. This is the usual default.</li>
+<li><strong>Exactly-once:</strong> not something the network provides end to end. It's built from at-least-once delivery plus <strong>idempotent processing</strong>, and Kafka transactions only cover Kafka-to-Kafka flows.</li>
+</ul>
+<p>So the practical rule is: <strong>every consumer must be idempotent.</strong></p>
+<h2 id="idempotent-consumers">Idempotent consumers</h2>
+<pre class="go"><code>func Dedupe(next Handler) Handler {
+    return func(ctx context.Context, m Message) error {
+        if seen(m.ID) { return nil }   // duplicate: ack without re-applying
+        if err := next(ctx, m); err != nil { return err }
+        markSeen(m.ID)                 // only after success
+        return nil
+    }
+}</code></pre>
+<p>In production, "seen" is a unique constraint in the same <strong>database transaction</strong> as the state change (<code>INSERT INTO processed(msg_id) ...</code> plus <code>UPDATE positions ...</code>), so the check and the effect can't diverge. An in-memory map is fine for learning and wrong across restarts.</p>
+<h2 id="retries-and-dead-letters">Retries and dead letters</h2>
+<p>A message that always fails (a "poison" message) must not block its partition forever. Retry with backoff for <strong>transient</strong> errors, and after N attempts, park it in a <strong>dead-letter queue</strong> with the error attached, alert on it, and move on. Distinguish error kinds: a validation error will never succeed on retry, so dead-letter it immediately.</p>
+<h2 id="ordering-per-key-not-global">Ordering: per key, not global</h2>
+<p>Global ordering doesn't scale. Order is only needed <strong>per entity</strong>: all events for account 42 in sequence, while accounts can proceed in parallel. Kafka does this by hashing the message key to a partition. Inside a Go consumer the same idea keeps parallelism without breaking order:</p>
+<pre class="go"><code>func (d *Dispatcher) Dispatch(m Message) {
+    h := fnv.New32a()
+    h.Write([]byte(m.Key))
+    d.parts[h.Sum32()%uint32(len(d.parts))] &lt;- m // one goroutine per partition = in-order per key
+}</code></pre>
+<h2 id="the-dual-write-problem-and-the-outbox">The dual-write problem and the outbox</h2>
+<p>"Update the DB, then publish the event" fails when the process dies between the two steps. <strong>Transactional outbox</strong>: write the event to an <code>outbox</code> table in the <strong>same transaction</strong> as the state change, and have a relay publish from that table (polling or CDC). Publishing becomes at-least-once, and consumers are idempotent anyway. This is standard system-design material for any ledger or order system.</p>
+<h2 id="consumer-loop-hygiene-in-go">Consumer loop hygiene in Go</h2>
+<ul>
+<li>One goroutine reads from the client, and processing fans out by key (as above) with bounded buffers for backpressure.</li>
+<li>Commit offsets or ack only <strong>after</strong> processing. With batching, commit the highest contiguous processed offset.</li>
+<li>Handle rebalances: stop processing revoked partitions and flush before giving them up.</li>
+<li>Shutdown on context cancel: stop fetching, drain in-flight work, commit, close. The same shape as HTTP graceful shutdown.</li>
+<li>Export consumer lag as a metric. It's the first thing to check in an incident.</li>
+</ul>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/20-messaging/README.md"><code>exercises/20-messaging</code></a>: an idempotent-consumer middleware, retry with a dead-letter queue, and a key-partitioned dispatcher that preserves per-key order, tested against a fake broker that duplicates and redelivers. Capstone stage 4 then wires this to real NATS.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "Most brokers guarantee at-most-once, at-least-once, or exactly-once by default?", "a": "at-least-once"}, {"q": "Making a handler safe to run twice on the same message is called what?", "a": "idempotency"}, {"q": "In Kafka, ordering is guaranteed only within a what?", "a": "partition"}, {"q": "A queue where repeatedly failing messages are parked is abbreviated what?", "a": "DLQ"}, {"q": "Writing events to a DB table in the same transaction as the state change is which pattern?", "a": "outbox"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0019-observability.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 19</a></span>
+  <span class="next"><a href="0021-interview-drills.html">Next: Go interview drills<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

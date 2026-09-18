@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 14: Testing like a Go team</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 14 &middot; Part 3 · Senior Go</p>
+<h1>Testing like a Go team</h1>
+
+<p>Go's testing culture is standard-library first. Table-driven tests, subtests, fakes built on small interfaces, fuzzing and benchmarks are what reviewers expect in every PR.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/wiki/TableDrivenTests">TableDrivenTests</a> (Go wiki), <a href="https://go.dev/doc/tutorial/fuzz">Tutorial: Getting started with fuzzing</a>, and the <a href="https://pkg.go.dev/testing">testing package docs</a>. Style: <a href="https://google.github.io/styleguide/go/decisions#useful-test-failures">Google style guide — Useful test failures</a>.
+</div>
+
+<h2 id="table-driven-tests">Table-driven tests</h2>
+<p>The default shape of a Go test:</p>
+<pre class="go"><code>func TestParsePrice(t *testing.T) {
+    tests := []struct {
+        name    string
+        in      string
+        want    int64
+        wantErr bool
+    }{
+        {name: &quot;whole&quot;, in: &quot;12&quot;, want: 1200},
+        {name: &quot;two decimals&quot;, in: &quot;12.34&quot;, want: 1234},
+        {name: &quot;letters&quot;, in: &quot;abc&quot;, wantErr: true},
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got, err := ParsePrice(tt.in)
+            if (err != nil) != tt.wantErr {
+                t.Fatalf(&quot;ParsePrice(%q) err = %v, wantErr %v&quot;, tt.in, err, tt.wantErr)
+            }
+            if got != tt.want {
+                t.Errorf(&quot;ParsePrice(%q) = %d, want %d&quot;, tt.in, got, tt.want)
+            }
+        })
+    }
+}</code></pre>
+<ul>
+<li>Adding a case is one line, and each subtest runs by name: <code>go test -run 'TestParsePrice/letters'</code>.</li>
+<li>Failure messages say <strong>function(input) = got, want X</strong>, so a failure can be understood without opening the test.</li>
+<li><code>t.Errorf</code> records a failure and continues. <code>t.Fatalf</code> stops the current (sub)test. Use Fatal when later checks would be meaningless.</li>
+<li><code>t.Helper()</code> in assertion helpers makes failures point at the caller.</li>
+<li><code>t.Parallel()</code> runs subtests concurrently. <code>t.Cleanup(f)</code>, <code>t.TempDir()</code>, <code>t.Setenv()</code> and <code>t.Context()</code> (1.24) handle setup and teardown.</li>
+</ul>
+<p>The standard library is enough. Many teams add <code>github.com/google/go-cmp/cmp</code> for readable struct diffs (<code>cmp.Diff(want, got)</code>). <code>testify</code> is popular, and some teams avoid it. Match the codebase.</p>
+<h2 id="fakes-over-mocks">Fakes over mocks</h2>
+<p>Go's implicit interfaces make hand-written fakes trivial. Define the <strong>small interface the code needs</strong> (lesson 15), then:</p>
+<pre class="go"><code>type fakeNotifier struct{ fills []Order }
+func (f *fakeNotifier) Filled(o Order) { f.fills = append(f.fills, o) }
+
+type fakeClock struct{ t time.Time }
+func (c *fakeClock) Now() time.Time { return c.t }</code></pre>
+<p>Fakes are plain code: readable, debuggable, and checked for state rather than call sequences. Generated mocks (<code>gomock</code>, <code>mockery</code>) help for large interfaces, but a large interface is usually the actual problem.</p>
+<h2 id="fuzzing">Fuzzing</h2>
+<p>Fuzzing (Go 1.18+) generates inputs to break <strong>properties</strong>:</p>
+<pre class="go"><code>func FuzzRoundTrip(f *testing.F) {
+    f.Add(int64(1234))                 // seed corpus
+    f.Fuzz(func(t *testing.T, c int64) {
+        got, err := ParsePrice(FormatPrice(c))
+        if err != nil || got != c {
+            t.Errorf(&quot;round trip %d -&gt; %q -&gt; %d, %v&quot;, c, FormatPrice(c), got, err)
+        }
+    })
+}</code></pre>
+<pre class="sh"><code>go test -run &#39;^$&#39; -fuzz FuzzRoundTrip -fuzztime 30s ./pricing/</code></pre>
+<p>Good properties to fuzz: round-trips (parse ↔︎ format, encode ↔︎ decode), "never panics on any input", and agreement between a fast implementation and a simple reference one. Parsers of external input, like FIX messages or JSON orders, should always have a fuzz test.</p>
+<h2 id="benchmarks">Benchmarks</h2>
+<pre class="go"><code>func BenchmarkParsePrice(b *testing.B) {
+    for b.Loop() {                   // Go 1.24+: handles timer reset and keeps results alive
+        ParsePrice(&quot;12345.67&quot;)
+    }
+}</code></pre>
+<pre class="sh"><code>go test -run &#39;^$&#39; -bench . -benchmem -count 10 ./... &gt; new.txt
+benchstat old.txt new.txt             # statistically compares runs</code></pre>
+<p>A single benchmark run is noise. Use <code>-count</code> of 6–10 and <code>benchstat</code>. Lesson 18 goes further.</p>
+<h2 id="integration-tests-and-golden-files">Integration tests and golden files</h2>
+<ul>
+<li>Guard slow tests with a build tag (<code>//go:build integration</code>) or <code>testing.Short()</code>.</li>
+<li>Use <code>testcontainers-go</code> to run real Postgres, Kafka or NATS in Docker from a test.</li>
+<li>For large outputs, compare against <code>testdata/*.golden</code> files with an <code>-update</code> flag to regenerate them.</li>
+<li><code>httptest.NewRecorder</code> and <code>httptest.NewServer</code> test HTTP code without a network (lesson 17).</li>
+</ul>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/14-testing/README.md"><code>exercises/14-testing</code></a>: the code is given, the tests are the task. Write table tests, a fuzz round-trip and a benchmark, then let the fuzzer find the planted bug.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "Which method runs a named subtest?", "a": "t.Run"}, {"q": "Which method marks a function as a test helper so failures report the caller&#x27;s line?", "a": "t.Helper"}, {"q": "Which benchmark loop form was added in Go 1.24?", "a": "b.Loop"}, {"q": "Which flag prints allocations per operation in benchmarks?", "a": "-benchmem"}, {"q": "Failing fuzz inputs are saved under which directory?", "a": "testdata/fuzz"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0013-concurrency-bugs.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 13</a></span>
+  <span class="next"><a href="0015-refactoring.html">Next: Refactoring Go code<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

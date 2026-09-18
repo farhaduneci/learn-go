@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 15: Refactoring Go code</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 15 &middot; Part 3 · Senior Go</p>
+<h1>Refactoring Go code</h1>
+
+<p>Senior Go work is mostly changing existing code safely. This lesson covers the recurring refactors that turn untestable Go into small, well-bounded packages, in steps that keep the build green.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/wiki/CodeReviewComments">Go Code Review Comments</a> (the checklist reviewers use), <a href="https://dave.cheney.net/practical-go/presentations/qcon-china.html">Practical Go</a> (Dave Cheney), and <em>Refactoring</em> (Martin Fowler, 2nd ed.) for the step-by-step mechanics.
+</div>
+
+<h2 id="start-with-a-safety-net">Start with a safety net</h2>
+<p>Before changing untested code, write <strong>characterization tests</strong> that pin down what it does today, bugs included. Then refactor in <strong>small steps</strong>, running <code>go test ./...</code> after each one, with each step committed separately. If a step breaks a test, revert it rather than debugging a large diff.</p>
+<p>In Go the compiler is part of the safety net: rename a method, and every call site that breaks is listed. gopls can rename, extract functions or variables, inline calls and change signatures safely.</p>
+<h2 id="refactor-1-extract-pure-functions">Refactor 1: extract pure functions</h2>
+<p>Separate <strong>decisions</strong> from <strong>effects</strong>. Parsing, validation and pricing rules shouldn't touch clocks, databases or stdout:</p>
+<pre class="go"><code>// before: parsing mixed into a 60-line loop that also writes to a global map
+// after:
+func ParseOrder(line string) (Order, error) // pure: trivially table-testable</code></pre>
+<h2 id="refactor-2-inject-dependencies-and-declare-interfaces-at-the-consumer">Refactor 2: inject dependencies, and declare interfaces at the consumer</h2>
+<p>The legacy pattern: <code>time.Now()</code>, a package-level <code>db</code>, <code>fmt.Println</code> for notifications. Replace each <strong>hidden input</strong> with an explicit dependency:</p>
+<pre class="go"><code>// Declared in the package that USES them: small, only the methods needed.
+type PositionStore interface {
+    Position(symbol string) int64
+    Add(symbol string, delta int64)
+}
+type Notifier interface{ Filled(o Order) }
+
+type Service struct {
+    store  PositionStore
+    now    func() time.Time    // a func is the smallest possible &quot;clock interface&quot;
+    notify Notifier
+}
+
+func NewService(store PositionStore, now func() time.Time, n Notifier) *Service</code></pre>
+<p>In Java or C# the interface usually lives next to the implementation. In Go it lives <strong>where it's consumed</strong>, because implicit satisfaction means the producer doesn't need to know about it. The concrete <code>*PostgresStore</code> satisfies <code>PositionStore</code> without importing the package that declares it, so packages stay decoupled and fakes need two methods instead of forty.</p>
+<p><strong>Accept interfaces, return structs:</strong> constructors return concrete types (<code>*MemStore</code>), and functions accept the narrowest interface they use. Returning an interface hides useful methods and forces type assertions.</p>
+<h2 id="refactor-3-replace-string-errors-with-typed-errors">Refactor 3: replace string errors with typed errors</h2>
+<p><code>out += "line 3: market closed"</code> becomes <code>ErrMarketClosed</code>, returned per line in a <code>Result</code>. Callers can now branch with <code>errors.Is</code> instead of parsing strings (lesson 5).</p>
+<h2 id="refactor-4-remove-global-state">Refactor 4: remove global state</h2>
+<p>Package-level mutable variables mean tests interfere with each other and parallel tests are impossible. Move the state into a struct created by a constructor, and wire it up in <code>main</code>. The same goes for <code>init()</code> that connects to things: move that into an explicit <code>Open</code>/<code>New</code>.</p>
+<h2 id="refactor-5-shrink-and-split">Refactor 5: shrink and split</h2>
+<p>Signals that a function or package has grown too much:</p>
+<ul>
+<li>Functions longer than a screen, or nested more than 3 levels deep. Use early returns and guard clauses: <em>handle the error, return, keep the happy path left-aligned</em>.</li>
+<li>Boolean parameters (<code>Process(o, true, false)</code>). Split into two functions, or use an options struct.</li>
+<li>More than ~4 parameters. Use a config struct or functional options (lesson 16).</li>
+<li>A package whose name doesn't describe everything in it, or that imports half the codebase.</li>
+<li>Interfaces with many methods and one implementation. Delete the interface, or split it at the consumers.</li>
+</ul>
+<h2 id="tools-that-do-the-refactoring">Tools that do the refactoring</h2>
+<pre class="sh"><code>gofmt -r &#39;a[b:len(a)] -&gt; a[b:]&#39; -w .   # pattern rewrite
+go fix ./...                            # apply modernisations (Go 1.26 &quot;modernizers&quot;)
+gopls rename / extract / inline         # via the editor
+staticcheck ./...                       # dead code, deprecated APIs, simplifications
+golangci-lint run                       # runs dozens of linters in one pass</code></pre>
+<p><code>go fix</code> in recent Go versions rewrites old idioms (<code>interface{}</code> → <code>any</code>, manual loops → <code>slices.Contains</code>, <code>for i := 0; i &lt; n; i++</code> → <code>for i := range n</code>) automatically. Running it on an old codebase is a cheap, reviewable win.</p>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/15-refactoring/README.md"><code>exercises/15-refactoring</code></a>: take a working-but-untestable <code>ProcessOrders</code> (global map, <code>time.Now</code>, <code>fmt.Println</code>, string errors) and move it into a pure parser plus a service with injected, consumer-defined interfaces, step by step.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "Where should an interface usually be defined: by the producer or the consumer package?", "a": "consumer"}, {"q": "Complete the proverb: accept interfaces, return what?", "a": "structs"}, {"q": "Tests written to pin down existing behaviour before a refactor are called what?", "a": "characterization tests"}, {"q": "Which gofmt flag applies a pattern rewrite rule?", "a": "-r"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0014-testing.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 14</a></span>
+  <span class="next"><a href="0016-design-patterns.html">Next: Design patterns in Go<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 10: Shared memory: sync, atomics &amp; the memory model</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 10 &middot; Part 2 · Concurrency</p>
+<h1>Shared memory: sync, atomics &amp; the memory model</h1>
+
+<p>Most production Go state is protected by mutexes, not channels. This lesson covers the sync toolbox, lock-free atomics, and the memory model's happens-before rule that decides whether code is correct at all.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/ref/mem">The Go Memory Model</a> (read the introduction and "Advice" first), <a href="https://go.dev/doc/articles/race_detector">Data Race Detector</a>, and the <a href="https://pkg.go.dev/sync">sync package docs</a>.
+</div>
+
+<h2 id="what-a-data-race-is">What a data race is</h2>
+<p>A <strong>data race</strong> is two goroutines accessing the same memory at the same time, at least one of them writing, with no synchronisation between them. In Go a race is <strong>undefined behaviour</strong>: torn reads, lost updates, or corrupted maps and slices. Python's GIL hid most of these (<code>counter += 1</code> was still unsafe, just rarely wrong). Go runs goroutines truly in parallel, so they show up under load.</p>
+<pre class="go"><code>count++ // read, add, write: three steps; two goroutines can interleave and lose updates</code></pre>
+<p><strong>Always run tests with <code>-race</code>.</strong> The detector instruments memory accesses and reports both conflicting stacks. It finds only races that actually happen during the run, so tests must exercise the concurrency. It adds roughly 5–10× CPU and memory overhead: fine in CI, usually too much for production.</p>
+<h2 id="sync.mutex-and-rwmutex">sync.Mutex and RWMutex</h2>
+<pre class="go"><code>type Positions struct {
+    mu  sync.Mutex        // guards qty; convention: the mutex sits above the fields it guards
+    qty map[string]int64
+}
+
+func (p *Positions) Apply(sym string, d int64) {
+    p.mu.Lock()
+    defer p.mu.Unlock()
+    p.qty[sym] += d
+}</code></pre>
+<ul>
+<li>The zero value is an unlocked mutex. <strong>Never copy</strong> a struct holding one: use pointer receivers. <code>go vet</code> (copylocks) catches copies.</li>
+<li>Keep critical sections <strong>short</strong>, and never do I/O or send on a channel while holding a lock. That's how latency spikes and deadlocks start.</li>
+<li><code>defer Unlock()</code> is cheap (open-coded defers since Go 1.14). Hand-unlocking pays off only in the hottest paths.</li>
+<li><code>sync.RWMutex</code> lets many readers in parallel (<code>RLock</code>) and one writer at a time. It only helps when reads greatly outnumber writes <strong>and</strong> critical sections aren't tiny. Otherwise its extra bookkeeping makes it slower than a plain <code>Mutex</code>. Measure.</li>
+<li>Go mutexes are <strong>not reentrant</strong>. Locking twice in the same goroutine deadlocks.</li>
+</ul>
+<h2 id="syncatomic">sync/atomic</h2>
+<p>For single counters, flags or pointers, atomics avoid locks entirely:</p>
+<pre class="go"><code>var n atomic.Int64
+n.Add(1); n.Load(); n.Store(0); n.CompareAndSwap(old, new)
+
+var cfg atomic.Pointer[Config] // lock-free config hot-swap: readers Load, a writer Stores a new pointer</code></pre>
+<p>Use the <strong>typed</strong> atomics (<code>atomic.Int64</code>, <code>atomic.Bool</code>, <code>atomic.Pointer[T]</code>, Go 1.19+). They can't be accidentally read non-atomically. Atomics are fast (a few ns, uncontended) but only protect <strong>one</strong> word. Keeping two fields consistent with each other needs a mutex.</p>
+<p><strong>False sharing:</strong> two atomics updated by different cores that sit in the same 64-byte cache line slow each other down. Padding (<code>_ [56]byte</code>) separates hot counters. That's a real low-latency technique, used only after a profile shows the problem.</p>
+<h2 id="once-oncevalue-pool-cond-sync.map">Once, OnceValue, Pool, Cond, sync.Map</h2>
+<ul>
+<li><code>sync.Once</code>, <code>sync.OnceFunc</code>, <code>sync.OnceValue(s)</code>: lazy, thread-safe, exactly-once initialisation.</li>
+<li><code>sync.Pool</code>: a cache of reusable objects that cuts allocations on hot paths (lesson 18). Pooled objects can disappear at any GC.</li>
+<li><code>sync.Map</code>: specialised for keys written once and read many times, or disjoint key sets per goroutine. For everything else a <code>map</code> plus <code>Mutex</code> is simpler and often faster.</li>
+<li><code>sync.Cond</code>: rarely the best tool. Channels usually express the same thing more clearly.</li>
+</ul>
+<h2 id="the-memory-model-in-one-rule">The memory model in one rule</h2>
+<p>Without synchronisation, <strong>there's no guarantee one goroutine ever sees another's write</strong>, or sees writes in the order they were made. Guarantees come from <strong>happens-before</strong> edges:</p>
+<ul>
+<li>A send on a channel happens before the matching receive completes.</li>
+<li>Closing a channel happens before a receive that returns because it's closed.</li>
+<li><code>Unlock</code> happens before the next <code>Lock</code> of the same mutex.</li>
+<li><code>wg.Done()</code> happens before the <code>wg.Wait()</code> it unblocks, and <code>once.Do(f)</code> completing happens before any <code>Do</code> returns.</li>
+<li>Atomic operations are sequentially consistent.</li>
+</ul>
+<p>That's why exercise 08's per-index writes are safe to read after <code>wg.Wait()</code>, and why a "just a boolean flag" loop like <code>for !done {}</code> may never terminate. The compiler is allowed to hoist the read out of the loop.</p>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/10-sync/README.md"><code>exercises/10-sync</code></a>: take four types that work single-threaded and make them correct under 50 goroutines: a mutex, an atomic counter, an RWMutex cache and <code>sync.OnceValue</code>. Read the race detector output before fixing each one.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "Which mutex type allows many concurrent readers?", "a": "RWMutex"}, {"q": "Which sync function (Go 1.21) turns a loader into a lazily computed, once-only value?", "a": "OnceValue"}, {"q": "What is the formal relation that guarantees one goroutine sees another&#x27;s write?", "a": "happens-before"}, {"q": "Which go vet check flags a struct containing a mutex being copied?", "a": "copylocks"}, {"q": "A data race is two accesses, at least one a write, without what?", "a": "synchronization"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0009-channels.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 9</a></span>
+  <span class="next"><a href="0011-context.html">Next: context.Context<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

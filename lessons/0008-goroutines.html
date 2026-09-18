@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 8: Goroutines &amp; the scheduler</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 8 &middot; Part 2 · Concurrency</p>
+<h1>Goroutines &amp; the scheduler</h1>
+
+<p>Goroutines are the reason teams choose Go for high-throughput backends. This lesson gives the mental model (cheap tasks, M:N scheduling, real parallelism, no GIL) and the discipline around starting and stopping them.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/tour/concurrency/1">A Tour of Go — Concurrency</a>, then Rob Pike's talk <a href="https://go.dev/blog/waza-talk">Concurrency is not Parallelism</a> (video, 30 min). For the scheduler: <a href="https://www.ardanlabs.com/blog/2018/08/scheduling-in-go-part2.html">Scheduling In Go, Part II</a> (Ardan Labs).
+</div>
+
+<h2 id="a-goroutine-is-a-function-call-that-runs-concurrently">A goroutine is a function call that runs concurrently</h2>
+<pre class="go"><code>go fetch(&quot;AAPL&quot;) // returns immediately; fetch runs concurrently</code></pre>
+<p>That's the whole syntax. A goroutine starts with a ~2 KB stack that grows and shrinks as needed, so <strong>hundreds of thousands</strong> of them are normal. OS threads cost roughly 1–8 MB and a kernel context switch each. Goroutine switches happen in user space and cost ~100 ns.</p>
+<h2 id="compared-with-python">Compared with Python</h2>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th></th>
+<th>Python threads</th>
+<th>Python asyncio</th>
+<th>Go goroutines</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Parallel CPU work</td>
+<td>No (GIL; free-threaded 3.13+ is experimental)</td>
+<td>No</td>
+<td><strong>Yes, on all cores</strong></td>
+</tr>
+<tr>
+<td>Blocking I/O</td>
+<td>OK</td>
+<td>Must be <code>await</code>ed, or it blocks the loop</td>
+<td>OK, the runtime parks the goroutine</td>
+</tr>
+<tr>
+<td>Function colouring</td>
+<td>No</td>
+<td>Yes, <code>async</code> spreads through the codebase</td>
+<td><strong>No</strong>, any function can be run with <code>go</code></td>
+</tr>
+<tr>
+<td>Cost per task</td>
+<td>~MBs</td>
+<td>small</td>
+<td>~2 KB</td>
+</tr>
+</tbody>
+</table>
+<p>Go gets asyncio's cheap concurrency with plain blocking code. Write <code>resp, err := http.Get(url)</code> in a goroutine; while it waits on the network, the runtime runs other goroutines on that thread. No <code>async</code>/<code>await</code> and no event loop to avoid blocking.</p>
+<h2 id="the-scheduler-g-m-p">The scheduler: G, M, P</h2>
+<ul>
+<li><strong>G</strong>: a goroutine (stack, instruction pointer, state).</li>
+<li><strong>M</strong>: an OS thread (machine).</li>
+<li><strong>P</strong>: a logical processor, a resource needed to run Go code, with a <strong>local run queue</strong> of Gs. There are <code>GOMAXPROCS</code> of them (default: CPU cores, or the container's CPU limit since Go 1.25).</li>
+</ul>
+<p>Each M must hold a P to run Gs. When a G blocks in a syscall, its M detaches from the P and another M picks the P up, so other goroutines keep running. Idle Ps <strong>steal work</strong> from busy Ps' queues. Since Go 1.14 the scheduler can <strong>preempt</strong> long-running goroutines asynchronously, so a tight loop can't starve the others.</p>
+<p>Network I/O goes through the <strong>netpoller</strong> (epoll/kqueue). A goroutine waiting on a socket takes no thread at all. That's how one Go process handles 100k connections.</p>
+<p>For latency-sensitive code, the same facts become questions to ask: how many runnable goroutines compete for <code>GOMAXPROCS</code> Ps? Is a hot goroutine being preempted or migrated between cores? <code>GODEBUG=schedtrace=1000</code> and the execution tracer (<code>go tool trace</code>) answer them (lesson 18).</p>
+<h2 id="waiting-for-goroutines">Waiting for goroutines</h2>
+<p><code>main</code> returning kills every goroutine. Waiting has to be explicit:</p>
+<pre class="go"><code>var wg sync.WaitGroup
+for i, s := range symbols {
+    wg.Go(func() {            // Go 1.25+: Add(1), go, defer Done() in one call
+        out[i] = fetch(s)     // each goroutine writes its OWN index: no data race
+    })
+}
+wg.Wait()</code></pre>
+<p>Before Go 1.25 the same code reads <code>wg.Add(1); go func() { defer wg.Done(); ... }()</code>. Call <code>Add</code> <strong>before</strong> <code>go</code>, never inside the goroutine, or <code>Wait</code> can return before the goroutine has registered.</p>
+<p><strong>Loop variables:</strong> since Go 1.22 every iteration gets a fresh <code>i</code> and <code>s</code>, so capturing them in a closure is safe. Older code (and older interview questions) show <code>go func(i int){...}(i)</code> to work around the pre-1.22 shared variable.</p>
+<h2 id="rules-for-every-goroutine">Rules for every goroutine</h2>
+<ol type="1">
+<li><strong>Know how it ends.</strong> Every <code>go</code> statement needs an answer to "what makes this goroutine return?", whether that's the input channel closing, context cancellation, or the work finishing. A goroutine that never returns is a <strong>leak</strong>: memory that can't be collected (lesson 13).</li>
+<li><strong>Know who waits for it.</strong> Fire-and-forget goroutines outlive their request, swallow errors, and race with shutdown.</li>
+<li><strong>Recover at the top if it runs untrusted work.</strong> A panic in any goroutine crashes the whole process, and the parent can't catch it.</li>
+<li><strong>Don't share memory without synchronisation.</strong> Either give each goroutine its own data (as above) or use channels and locks (lessons 9–10).</li>
+</ol>
+<h2 id="concurrency-is-not-parallelism">Concurrency is not parallelism</h2>
+<p>Concurrency is <strong>structuring</strong> a program as independently executing pieces. Parallelism is <strong>executing</strong> them at the same time on several cores. Go programs are written concurrently, and the runtime makes them parallel when cores are available. A concurrent design stays correct with <code>GOMAXPROCS=1</code>, which is a useful test.</p>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/08-goroutines/README.md"><code>exercises/08-goroutines</code></a>: a parallel sum with per-goroutine result slots, and a concurrent, order-preserving <code>FetchAll</code> whose test measures real parallelism and checks for leaked goroutines.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "In the GMP model, what does P stand for?", "a": "processor"}, {"q": "Which environment variable sets how many Ps (parallel OS threads running Go code) exist?", "a": "GOMAXPROCS"}, {"q": "Roughly how big is a new goroutine&#x27;s initial stack?", "a": "2 KB"}, {"q": "Which sync type waits for a collection of goroutines to finish?", "a": "WaitGroup"}, {"q": "What happens to the program if a goroutine panics without recovering?", "a": "crashes"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0007-packages.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 7</a></span>
+  <span class="next"><a href="0009-channels.html">Next: Channels &amp; select<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

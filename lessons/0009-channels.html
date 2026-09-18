@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 9: Channels &amp; select</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 9 &middot; Part 2 · Concurrency</p>
+<h1>Channels &amp; select</h1>
+
+<p>Channels let goroutines communicate by passing values, and moving data through them transfers ownership. Getting the ownership rules right (who sends, who closes, who waits) is what separates working concurrent Go from code that deadlocks.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://go.dev/blog/pipelines">Go Concurrency Patterns: Pipelines and cancellation</a> (go.dev blog, the essential read) and <a href="https://go.dev/doc/effective_go#channels">Effective Go — Channels</a>. Talk: <a href="https://www.youtube.com/watch?v=f6kdp27TYZs">Go Concurrency Patterns</a> (Rob Pike, 2012).
+</div>
+
+<h2 id="dont-communicate-by-sharing-memory-share-memory-by-communicating">Don't communicate by sharing memory; share memory by communicating</h2>
+<pre class="go"><code>ch := make(chan int)      // unbuffered
+ch &lt;- 42                  // send: blocks until a receiver takes it
+v := &lt;-ch                 // receive: blocks until a sender provides one
+v, ok := &lt;-ch             // ok == false once the channel is closed and drained
+close(ch)                 // no more sends; receivers drain what is left, then get zero values
+for v := range ch { }     // receive until closed</code></pre>
+<p>An <strong>unbuffered</strong> channel is a synchronisation point: the send completes only when a receiver takes the value, so both goroutines meet. A <strong>buffered</strong> channel <code>make(chan int, 64)</code> lets the sender run ahead until the buffer is full. The buffer is a <strong>queue with backpressure</strong>: when consumers fall behind, producers block. That's often exactly what's wanted.</p>
+<h2 id="direction-types-document-ownership">Direction types document ownership</h2>
+<pre class="go"><code>func Gen(nums ...int) &lt;-chan int          // caller can only receive
+func Square(in &lt;-chan int) &lt;-chan int      // reads in, owns and closes its output
+func sink(out chan&lt;- Trade)                // can only send</code></pre>
+<p>The rules that prevent most channel bugs:</p>
+<ol type="1">
+<li><strong>The sending side closes the channel</strong>, and only when it's certain nothing else will send. Receivers never close.</li>
+<li>With <strong>several senders</strong>, none of them can close safely. A coordinator closes after a <code>WaitGroup</code> says all senders are done (see <code>Merge</code> below).</li>
+<li>Closing is a <strong>broadcast</strong>: every receiver sees it. That's why <code>close(done)</code> is the idiomatic stop signal.</li>
+</ol>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Operation</th>
+<th>nil channel</th>
+<th>open channel</th>
+<th>closed channel</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>send</td>
+<td>blocks forever</td>
+<td>blocks until received or buffered</td>
+<td><strong>panic</strong></td>
+</tr>
+<tr>
+<td>receive</td>
+<td>blocks forever</td>
+<td>blocks until a value arrives</td>
+<td>zero value, <code>ok=false</code></td>
+</tr>
+<tr>
+<td>close</td>
+<td><strong>panic</strong></td>
+<td>succeeds</td>
+<td><strong>panic</strong></td>
+</tr>
+</tbody>
+</table>
+<h2 id="pipelines-and-fan-in">Pipelines and fan-in</h2>
+<pre class="go"><code>func Square(in &lt;-chan int) &lt;-chan int {
+    out := make(chan int)
+    go func() {
+        defer close(out)       // this goroutine is the only sender, so it closes
+        for n := range in {
+            out &lt;- n * n
+        }
+    }()
+    return out
+}
+
+func Merge(chans ...&lt;-chan int) &lt;-chan int {
+    out := make(chan int)
+    var wg sync.WaitGroup
+    for _, c := range chans {
+        wg.Go(func() {
+            for v := range c { out &lt;- v }
+        })
+    }
+    go func() { wg.Wait(); close(out) }() // close once ALL senders are finished
+    return out
+}
+
+for v := range Merge(Square(Gen(1, 2)), Square(Gen(3))) { ... }</code></pre>
+<h2 id="select">select</h2>
+<p><code>select</code> waits on several channel operations and runs whichever is ready first (at random if several are):</p>
+<pre class="go"><code>select {
+case q := &lt;-quotes:
+    handle(q)
+case &lt;-time.After(50 * time.Millisecond):
+    return ErrTimeout
+case &lt;-ctx.Done():
+    return ctx.Err()
+}</code></pre>
+<ul>
+<li>A <code>default</code> case makes it <strong>non-blocking</strong>: <code>select { case ch &lt;- v: default: dropped++ }</code> is how a publisher avoids stalling on a slow consumer (exercise 16).</li>
+<li>Setting a channel variable to <code>nil</code> <strong>disables</strong> its case, which is handy when one of two inputs has closed.</li>
+<li>In loops, use one <code>time.NewTimer</code> and <code>Reset</code> it instead of calling <code>time.After</code> on every iteration.</li>
+</ul>
+<h2 id="the-timeout-leak-trap">The timeout-leak trap</h2>
+<pre class="go"><code>func WithTimeout(f func() int, d time.Duration) (int, bool) {
+    done := make(chan int, 1)       // BUFFERED: if the timeout wins,
+    go func() { done &lt;- f() }()     // this send still succeeds and the goroutine exits
+    select {
+    case v := &lt;-done: return v, true
+    case &lt;-time.After(d): return 0, false
+    }
+}</code></pre>
+<p>With an unbuffered channel, a timed-out call leaves its goroutine blocked on <code>done &lt;- f()</code> forever. This exact leak comes up in code reviews and interviews.</p>
+<h2 id="channels-or-mutex">Channels or mutex?</h2>
+<p>Use <strong>channels</strong> to transfer ownership of data, distribute work, or signal events. Use a <strong>mutex</strong> to protect state that several goroutines read and update in place, like a cache or a counter. <em>"Channels orchestrate; mutexes serialise."</em> A channel used as a lock is slower and harder to read than <code>sync.Mutex</code>.</p>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/09-channels/README.md"><code>exercises/09-channels</code></a>: generator, pipeline stage, fan-in, a leak-free timeout, and a size-or-time batcher (the flush pattern used for market data and order writes).</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "Who should close a channel: the sender or the receiver?", "a": "sender"}, {"q": "What does a receive from a closed, drained channel return?", "a": "zero value"}, {"q": "What happens on a send to a closed channel?", "a": "panic"}, {"q": "What does a send or receive on a nil channel do?", "a": "blocks forever"}, {"q": "Which select clause makes a channel operation non-blocking?", "a": "default"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0008-goroutines.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 8</a></span>
+  <span class="next"><a href="0010-sync.html">Next: Shared memory: sync, atomics &amp; the memory model<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preload" href="../assets/fonts/InterVariable.woff2" as="font" type="font/woff2" crossorigin />
+<title>Lesson 17: Building services: net/http, JSON, graceful shutdown, gRPC</title>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem("theme") === "light") {
+      document.documentElement.setAttribute("data-theme", "light");
+    }
+  } catch (e) {}
+})();
+</script>
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg" />
+<link rel="alternate icon" href="../assets/favicon.ico" />
+<link rel="stylesheet" href="../assets/style.css" />
+</head>
+<body>
+
+<button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><i class="icon" data-icon="moon" aria-hidden="true"></i></button>
+
+<p class="lesson-kicker"><a href="../index.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Learning Path</a> &middot; Lesson 17 &middot; Part 3 · Senior Go</p>
+<h1>Building services: net/http, JSON, graceful shutdown, gRPC</h1>
+
+<p>Go's standard library contains a production-grade HTTP server. This lesson builds a JSON API the way reviewers expect it (routing, validation, timeouts, graceful shutdown) and introduces gRPC, the usual protocol between internal services.</p>
+
+<nav class="toc" data-toc>
+  <div class="toc-title"><i class="icon" data-icon="list-bullets" aria-hidden="true"></i>On this page</div>
+</nav>
+
+<div class="callout">
+  <div class="callout-title"><i class="icon" data-icon="book-open-text" aria-hidden="true"></i>Primary source</div>
+  <a href="https://pkg.go.dev/net/http">net/http docs</a>, <a href="https://go.dev/blog/routing-enhancements">Routing Enhancements for Go 1.22</a>, <a href="https://grafana.com/blog/2024/02/09/how-i-write-http-services-in-go-after-13-years/">How I write HTTP services in Go after 13 years</a> (Mat Ryer), and <a href="https://grpc.io/docs/languages/go/quickstart/">gRPC Go Quick start</a>.
+</div>
+
+<h2 id="routing-with-the-standard-library">Routing with the standard library</h2>
+<p>Since Go 1.22, <code>http.ServeMux</code> supports methods and wildcards, so a third-party router is optional:</p>
+<pre class="go"><code>mux := http.NewServeMux()
+mux.HandleFunc(&quot;GET /healthz&quot;, health)
+mux.HandleFunc(&quot;GET /quotes/{symbol}&quot;, a.getQuote)   // r.PathValue(&quot;symbol&quot;)
+mux.HandleFunc(&quot;POST /orders&quot;, a.postOrder)
+// wrong method → 405 automatically; unknown path → 404</code></pre>
+<p>A handler is anything with <code>ServeHTTP(w http.ResponseWriter, r *http.Request)</code>. <code>net/http</code> runs <strong>each request in its own goroutine</strong>, so handlers must be safe for concurrent use. Shared state needs a mutex or atomics (the order-ID counter in exercise 17 is an <code>atomic.Int64</code>).</p>
+<h2 id="json-in-and-out-defensively">JSON in and out, defensively</h2>
+<pre class="go"><code>func (a *api) postOrder(w http.ResponseWriter, r *http.Request) {
+    r.Body = http.MaxBytesReader(w, r.Body, 1&lt;&lt;20) // never trust body size
+    dec := json.NewDecoder(r.Body)
+    dec.DisallowUnknownFields()                     // typos in field names become 400s
+    var req OrderRequest
+    if err := dec.Decode(&amp;req); err != nil {
+        writeError(w, http.StatusBadRequest, &quot;invalid JSON&quot;)
+        return
+    }
+    if err := req.Validate(); err != nil { ... }
+    writeJSON(w, http.StatusCreated, resp)
+}</code></pre>
+<p>Struct tags control encoding (<code>json:"symbol"</code>, <code>json:"price,omitempty"</code>). Set <code>Content-Type</code>, then <code>WriteHeader</code>, then write the body. Headers set after the first write are silently ignored. Map domain errors to status codes <strong>in one place</strong>, not in every handler.</p>
+<h2 id="timeouts-are-mandatory">Timeouts are mandatory</h2>
+<p>The zero-value <code>http.Server</code> has <strong>no timeouts</strong>, so slow clients can hold connections forever. Also, <code>http.Get</code> uses <code>http.DefaultClient</code>, which has <strong>no timeout</strong>. Production settings:</p>
+<pre class="go"><code>srv := &amp;http.Server{
+    Addr:              &quot;:8080&quot;,
+    Handler:           mux,
+    ReadHeaderTimeout: 5 * time.Second,
+    ReadTimeout:       10 * time.Second,
+    WriteTimeout:      10 * time.Second,
+    IdleTimeout:       60 * time.Second,
+}
+client := &amp;http.Client{Timeout: 3 * time.Second} // reuse one client: it pools connections</code></pre>
+<p>Always <code>defer resp.Body.Close()</code> <strong>and</strong> read the body to completion, or connections can't be reused.</p>
+<h2 id="graceful-shutdown">Graceful shutdown</h2>
+<p>On Kubernetes, a pod gets SIGTERM and then a grace period (30s by default). The service should stop taking new requests, finish in-flight ones, flush buffers and close resources:</p>
+<pre class="go"><code>func main() {
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+    defer stop()
+    if err := run(ctx); err != nil {
+        slog.Error(&quot;fatal&quot;, &quot;err&quot;, err)
+        os.Exit(1)
+    }
+}
+
+func Serve(ctx context.Context, ln net.Listener, h http.Handler) error {
+    srv := &amp;http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second}
+    errc := make(chan error, 1)
+    go func() { errc &lt;- srv.Serve(ln) }()
+    select {
+    case err := &lt;-errc:
+        return err
+    case &lt;-ctx.Done():
+    }
+    sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // fresh ctx: the old one is done
+    defer cancel()
+    if err := srv.Shutdown(sctx); err != nil {
+        return err
+    }
+    if err := &lt;-errc; !errors.Is(err, http.ErrServerClosed) {
+        return err
+    }
+    return nil
+}</code></pre>
+<p>The <code>main</code> → <code>run(ctx) error</code> split keeps <code>main</code> to three lines and makes the whole service testable.</p>
+<h2 id="grpc">gRPC</h2>
+<p>Internal service-to-service traffic in trading systems usually runs over <strong>gRPC</strong>: HTTP/2, binary <strong>protobuf</strong> messages, generated clients, deadlines propagated across services, and <strong>streaming</strong>.</p>
+<pre class="protobuf"><code>service OrderService {
+  rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse);
+  rpc StreamTrades(StreamTradesRequest) returns (stream Trade); // server streaming
+}</code></pre>
+<pre class="sh"><code>protoc --go_out=. --go-grpc_out=. order.proto   # or `buf generate`</code></pre>
+<p>The generated server interface is implemented like any Go interface. Every RPC receives a <code>ctx</code> carrying the caller's deadline. Middleware becomes <strong>interceptors</strong>. Know the four RPC kinds (unary, server-streaming, client-streaming, bidirectional) and why protobuf beats JSON on the hot path: smaller, faster to parse, and schema-evolved through field numbers. Capstone stage 3 has a stretch goal to expose the engine over gRPC.</p>
+<h2 id="exercise">Exercise</h2>
+<p><a href="../exercises/17-services/README.md"><code>exercises/17-services</code></a>: a standard-library JSON API with method routing, body limits, strict decoding, concurrency-safe IDs, and a graceful shutdown that the test proves lets an in-flight request finish.</p>
+
+<h2 id="retrieval-check">Retrieval check</h2>
+<p>No scrolling up. Short answers.</p>
+
+<div class="quiz" data-questions='[{"q": "Which request method returns a path wildcard like {symbol}?", "a": "PathValue"}, {"q": "Which server method stops accepting connections and waits for in-flight requests?", "a": "Shutdown"}, {"q": "Which json.Decoder method rejects unexpected JSON keys?", "a": "DisallowUnknownFields"}, {"q": "Which http wrapper caps how many body bytes a handler reads?", "a": "MaxBytesReader"}, {"q": "gRPC messages are defined in which IDL?", "a": "protobuf"}]'></div>
+
+<div class="ask-agent">
+  <i class="icon" data-icon="chat-circle-dots" aria-hidden="true"></i>
+  <span>Stuck, or want a deeper dive on one idea? Ask a coding agent to explain it with a different example, or to review the exercise solution line by line.</span>
+</div>
+
+<div class="lesson-nav">
+  <span><a href="0016-design-patterns.html"><i class="icon" data-icon="arrow-left" aria-hidden="true"></i>Lesson 16</a></span>
+  <span class="next"><a href="0018-performance.html">Next: Performance: benchmarks, pprof, allocations &amp; the GC<i class="icon" data-icon="arrow-right" aria-hidden="true"></i></a></span>
+</div>
+
+<script src="../assets/icons.js"></script>
+<script src="../assets/toc.js"></script>
+<script src="../assets/quiz.js"></script>
+<script src="../assets/theme.js"></script>
+</body>
+</html>
