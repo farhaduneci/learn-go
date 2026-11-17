@@ -19,10 +19,10 @@ The goal is working, senior-level Go proficiency for backend roles that build lo
 - Local tooling only: Go 1.26+, Docker for the capstone's later stages. No cloud spend.
 
 ## Out of scope (owned by sibling tracks)
-This track is **Go-specific**. Other skills the benchmark role asks for are left to separate tracks, created when reached, rather than taught shallowly here:
+This track is **Go-specific**. Other skills the benchmark role asks for are left to separate tracks, created when reached, rather than taught shallowly here. Each exists now:
 
-1. **`learn-system-design`**: distributed systems, message-broker internals (Kafka/NATS/Pub/Sub), consistency, databases, scaling, system-design interview practice.
-2. **`learn-trading-systems`**: order books and matching in depth, OMS/RMS, the FIX protocol, market data, financial ledgers, exchange connectivity.
-3. **`learn-cpp`**: C/C++ fundamentals for low-latency systems.
+1. **[`learn-system-design`](https://github.com/farhaduneci/learn-system-design)**: distributed systems, message-broker internals (Kafka/NATS/Pub/Sub), consistency, databases, scaling, system-design interview practice.
+2. **[`learn-trading-systems`](https://github.com/farhaduneci/learn-trading-systems)**: order books and matching in depth, OMS/RMS, the FIX protocol, market data, financial ledgers, exchange connectivity.
+3. **[`learn-cpp`](https://github.com/farhaduneci/learn-cpp)**: C/C++ fundamentals for low-latency systems.
 
 Docker and Kubernetes are owned by [`learn-kubernetes`](https://github.com/farhaduneci/learn-kubernetes), and GCP/cloud fundamentals by a cloud track. Lesson 20 and the capstone touch brokers and trading only as far as Go code needs them.
